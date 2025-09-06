@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* CYBERKINGDOM America-Centric Color Palette */
+:root {
+  /* Core America Colors */
+  --america-red: #B22234;
+  --america-navy: #3C3B6E;
+  --america-white: #FFFFFF;
+  --america-gray: #E5E7EB;
+  --america-text: #1F2937;
+  
+  /* Extended Palette */
+  --america-red-light: #DC2626;
+  --america-red-dark: #991B1B;
+  --america-navy-light: #4F46E5;
+  --america-navy-dark: #312E81;
+  --america-gray-light: #F9FAFB;
+  --america-gray-dark: #6B7280;
+  
+  /* shadcn/ui compatibility */
+  --background: 0 0% 100%;
+  --foreground: 216 13% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 216 13% 12%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 216 13% 12%;
+  --primary: 222 47% 32%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 210 40% 94%;
+  --secondary-foreground: 216 13% 12%;
+  --muted: 210 40% 94%;
+  --muted-foreground: 215 16% 47%;
+  --accent: 210 40% 94%;
+  --accent-foreground: 216 13% 12%;
+  --destructive: 0 65% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 214 32% 91%;
+  --input: 214 32% 91%;
+  --ring: 222 47% 32%;
+  --radius: 0.5rem;
+}
+
+.dark {
+  --background: 216 13% 12%;
+  --foreground: 0 0% 98%;
+  --card: 216 13% 12%;
+  --card-foreground: 0 0% 98%;
+  --popover: 216 13% 12%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 0 0% 98%;
+  --primary-foreground: 216 13% 12%;
+  --secondary: 215 28% 17%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 215 28% 17%;
+  --muted-foreground: 217 11% 65%;
+  --accent: 215 28% 17%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 63% 31%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 215 28% 17%;
+  --input: 215 28% 17%;
+  --ring: 0 0% 98%;
+}
+
+/* Custom America Theme Classes */
+.bg-america-red { background-color: var(--america-red); }
+.bg-america-navy { background-color: var(--america-navy); }
+.bg-america-white { background-color: var(--america-white); }
+.bg-america-gray { background-color: var(--america-gray); }
+
+.text-america-red { color: var(--america-red); }
+.text-america-navy { color: var(--america-navy); }
+.text-america-white { color: var(--america-white); }
+.text-america-gray { color: var(--america-gray); }
+.text-america-text { color: var(--america-text); }
+
+.border-america-red { border-color: var(--america-red); }
+.border-america-navy { border-color: var(--america-navy); }
+.border-america-gray { border-color: var(--america-gray); }
+
+/* Custom Gradients */
+.gradient-america {
+  background: linear-gradient(135deg, var(--america-red) 0%, var(--america-navy) 100%);
+}
+
+.gradient-america-light {
+  background: linear-gradient(135deg, var(--america-red-light) 0%, var(--america-navy-light) 100%);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Custom Components */
+@layer components {
+  .prayer-card {
+    @apply bg-card border border-border rounded-lg p-6 shadow-sm hover:shadow-md transition-shadow duration-200;
+  }
+  
+  .tier-pill {
+    @apply inline-flex items-center px-3 py-1 rounded-full text-xs font-medium;
+  }
+  
+  .america-button {
+    @apply bg-gradient-to-r from-america-red to-america-navy text-white font-semibold py-2 px-4 rounded-md hover:opacity-90 transition-opacity duration-200;
+  }
+}

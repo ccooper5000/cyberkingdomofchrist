@@ -1,0 +1,228 @@
+// netlify/functions/outreach-processor.ts
+import type { Handler } from '@netlify/functions';
+import { createClient } from '@supabase/supabase-js';
+import { renderEmailHTML } from './email-template';
+
+// ---- ENV ----
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const POSTMARK_SERVER_TOKEN = process.env.POSTMARK_SERVER_TOKEN!; // <-- Postmark Server API token
+const EMAIL_FROM = process.env.EMAIL_FROM!;                       // <-- must be a Postmark-verified sender/domain
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || 'Cyber Kingdom of Christ';
+const ADMIN_SECRET = process.env.CKOC_ADMIN_SECRET;
+
+// ---- Setup ----
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// ---- Types/Helpers ----
+type Tier = 'free' | 'supporter' | 'patron' | 'admin';
+
+function normalizeOffice(office: string | null): string {
+  return (office || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+}
+function titleForRep(office: string | null): 'Sen.' | 'Rep.' | 'President' | 'Hon.' {
+  const o = normalizeOffice(office);
+  if (o.includes('president')) return 'President';
+  if (o.includes('senate') || o.includes('senator')) return 'Sen.';
+  if (o.includes('house') || o.includes('representative') || o.includes('congress')) return 'Rep.';
+  return 'Hon.';
+}
+function lastNameFrom(name: string): string {
+  const raw = (name || '').replace(/[.,]/g, ' ').trim();
+  const parts = raw.split(/\s+/);
+  const suffixes = new Set(['jr','jr.','sr','sr.','ii','iii','iv','phd','m.d.','md','esq','esq.']);
+  while (parts.length && suffixes.has(parts[parts.length - 1].toLowerCase())) parts.pop();
+  return parts.length ? parts[parts.length - 1] : (name || '').trim();
+}
+function greetingOnly(office: string | null, name: string): string {
+  return `Dear ${titleForRep(office)} ${lastNameFrom(name)},`;
+}
+function withGreeting(office: string | null, name: string, body: string): string {
+  return `${greetingOnly(office, name)}\n\n${body || ''}`;
+}
+/** Accept email as text[] or a Postgres array-literal string like "{a@b,c@d}". */
+function normalizeEmails(val: unknown): string[] {
+  if (Array.isArray(val)) {
+    return (val as unknown[]).filter((x): x is string => typeof x === 'string');
+  }
+  if (typeof val === 'string') {
+    return val.replace(/^\{|\}$/g, '').split(',').map(s => s.trim()).filter(Boolean);
+  }
+  return [];
+}
+function allowedChannelsForTier(_tier: Tier | null): Set<string> {
+  // Today: email only
+  return new Set(['email']);
+}
+
+const tierCache = new Map<string, Tier>();
+async function getUserTier(userId: string): Promise<Tier> {
+  const cached = tierCache.get(userId);
+  if (cached) return cached;
+  const { data } = await supabase.from('profiles').select('tier').eq('id', userId).maybeSingle();
+  const t = (data?.tier || 'free') as Tier;
+  tierCache.set(userId, t);
+  return t;
+}
+
+async function getQueued(limit = 50) {
+  const { data, error } = await supabase
+    .from('outreach_requests')
+    .select(`
+      id, user_id, prayer_id, target_rep_id, channels, status, subject, body,
+      representatives:target_rep_id ( id, name, office, email )
+    `)
+    .eq('status', 'queued')
+    .contains('channels', ['email'])
+    .limit(limit);
+
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+async function markSent(id: string) {
+  await supabase
+    .from('outreach_requests')
+    .update({ status: 'sent', sent_at: new Date().toISOString(), error: null })
+    .eq('id', id);
+}
+async function markFailed(id: string, message: string) {
+  await supabase
+    .from('outreach_requests')
+    .update({ status: 'failed', error: message })
+    .eq('id', id);
+}
+
+async function sendWithPostmark(opts: {
+  to: string;
+  subject: string;
+  html?: string | null;
+  text?: string | null;
+}) {
+  const res = await fetch('https://api.postmarkapp.com/email', {
+    method: 'POST',
+    headers: {
+      'X-Postmark-Server-Token': POSTMARK_SERVER_TOKEN,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      From: EMAIL_FROM_NAME ? `${EMAIL_FROM_NAME} <${EMAIL_FROM}>` : EMAIL_FROM,
+      To: opts.to,
+      Subject: opts.subject,
+      HtmlBody: opts.html || undefined,
+      TextBody: opts.text || undefined,
+      MessageStream: 'outbound',
+    }),
+  });
+
+  const json = await res.json().catch(() => ({} as any));
+  // Postmark returns HTTP 200 and ErrorCode 0 on success
+  if (!res.ok || (json?.ErrorCode ?? 0) !== 0) {
+    const msg = json?.Message || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return json;
+}
+
+async function deliverQueued(): Promise<{ processed: number; sent: number; failed: number }> {
+  if (!POSTMARK_SERVER_TOKEN) throw new Error('POSTMARK_SERVER_TOKEN missing');
+  if (!EMAIL_FROM) throw new Error('EMAIL_FROM missing');
+
+  const batch = await getQueued(100);
+  let processed = 0, sent = 0, failed = 0;
+
+  for (const row of batch) {
+    processed += 1;
+
+    // @ts-ignore relation alias above
+    const rep = row.representatives as { id: string; name: string; office: string | null; email: unknown } | null;
+    if (!rep) { await markFailed(row.id, 'Representative not found'); failed++; continue; }
+
+    // 1) Tier enforcement (future-proofing)
+    const tier = await getUserTier(row.user_id);
+    const allowed = allowedChannelsForTier(tier);
+    const requested = (row.channels as string[]) || [];
+    const disallowed = requested.filter(ch => !allowed.has(ch));
+    if (disallowed.length) {
+      await markFailed(row.id, `Channel(s) not allowed for tier '${tier}': ${disallowed.join(', ')}`);
+      failed++; continue;
+    }
+
+    // 2) Resolve recipient
+    const emails = normalizeEmails(rep.email);
+    const toEmail = emails[0] ?? null;
+    if (!toEmail) { await markFailed(row.id, 'No email on file for representative'); failed++; continue; }
+
+    // 3) Compose
+    const subject = row.subject || 'Message from a Cyber Kingdom of Christ user';
+    const greeting = greetingOnly(rep.office, (rep as any).name);
+    const text = withGreeting(rep.office, (rep as any).name, row.body || '');
+    const html = renderEmailHTML({ subject, greeting, body: row.body || '' });
+
+    // 4) Send
+    try {
+      await sendWithPostmark({ to: toEmail, subject, html, text });
+      await markSent(row.id);
+      sent += 1;
+    } catch (e: any) {
+      await markFailed(row.id, String(e?.message || 'Send failed'));
+      failed += 1;
+    }
+  }
+
+  return { processed, sent, failed };
+}
+
+export const handler: Handler = async (event) => {
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type, x-ckoc-admin',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  };
+
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers, body: '' };
+  }
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method not allowed' }) };
+  }
+
+  const adminHeader = event.headers['x-ckoc-admin'] || event.headers['X-Ckoc-Admin'];
+  const isAdminOK = ADMIN_SECRET ? adminHeader === ADMIN_SECRET : true;
+  if (!isAdminOK) {
+    return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  try {
+    const payload = JSON.parse(event.body || '{}');
+
+    if (payload.action === 'deliver_queued') {
+      const result = await deliverQueued();
+      return { statusCode: 200, headers, body: JSON.stringify({ ok: true, ...result }) };
+    }
+
+    if (payload.action === 'mark_sent') {
+      const ids: string[] = Array.isArray(payload.ids) ? payload.ids : [];
+      if (!ids.length) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: 'No ids provided' }) };
+      }
+      const { error } = await supabase
+        .from('outreach_requests')
+        .update({ status: 'sent', sent_at: new Date().toISOString(), error: null })
+        .in('id', ids);
+      if (error) {
+        return { statusCode: 500, headers, body: JSON.stringify({ error: `Update failed: ${error.message}` }) };
+      }
+      return { statusCode: 200, headers, body: JSON.stringify({ ok: true, updated: ids.length }) };
+    }
+
+    if (payload.action === 'group_invitation') {
+      // placeholder – your group invitation logic can reuse sendWithPostmark if needed
+      return { statusCode: 200, headers, body: JSON.stringify({ ok: true }) };
+    }
+
+    return { statusCode: 400, headers, body: JSON.stringify({ error: 'Unknown action' }) };
+  } catch (e: any) {
+    return { statusCode: 500, headers, body: JSON.stringify({ error: e?.message || 'Server error' }) };
+  }
+};
