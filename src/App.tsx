@@ -3,6 +3,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider } from '@/components/theme-provider';
 import { Toaster } from '@/components/ui/toaster';
+import AuthCallback from '@/pages/AuthCallback'
 
 // Pages
 import Feed from '@/pages/Feed';
@@ -32,7 +33,8 @@ function App() {
             <Route path="circles" element={<Circles />} />
             <Route path="privacy" element={<Privacy />} />
             <Route path="terms" element={<Terms />} />
-            <Route path="/post" element={<PostPrayer />} 
+            <Route path="/post" element={<PostPrayer />} />
+            <Route path="/auth/callback" element={<AuthCallback />}
             />
           </Route>
         </Routes>
