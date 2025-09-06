@@ -101,7 +101,7 @@ export async function fetchFeed({
   if (error) throw error;
 
   // Narrow visibility at type-level
-  return (data ?? []).map((p) => ({ ...p, visibility: (p.visibility as Visibility) })) as StrictPrayer[];
+  return (data ?? []).map((p: any) => ({ ...p, visibility: p.visibility as Visibility })) as StrictPrayer[];
 }
 
 export async function countTodaysPosts(userId: string) {
@@ -217,7 +217,7 @@ export async function getUserRepresentatives(userId: string) {
   if (error) throw error;
 
   // Flatten to an easier shape
-  return (data ?? []).map((r) => ({
+  return (data ?? []).map((r: any) => ({
     level: r.level,
     rep: r.representatives as unknown as Representative,
   })) as { level: UserRepresentative['level']; rep: Representative }[];
