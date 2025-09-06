@@ -1,6 +1,6 @@
 import React from 'react';
 import PrayerCard from '@/components/PrayerCard';
-import type { Prayer } from '@/types/database';
+import type { Prayer } from '@/types/dbTypes';
 
 interface FeedProps {
   prayers: Prayer[];
