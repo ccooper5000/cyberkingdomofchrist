@@ -7,8 +7,6 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": { "@/*": ["src/*"] },
-
-    // Make the initial deploy smoother
     "jsx": "react-jsx",
     "noUnusedLocals": false,
     "noUnusedParameters": false,
