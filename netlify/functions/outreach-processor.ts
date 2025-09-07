@@ -8,11 +8,13 @@ import { renderEmailHTML } from './email-template'
 // ────────────────────────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL!
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!
+const SUPABASE_ANON_KEY =
+  process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''
 
 const POSTMARK_SERVER_TOKEN = (process.env.POSTMARK_SERVER_TOKEN || '').trim() // Server API token
 const EMAIL_FROM = (process.env.EMAIL_FROM || '').trim()                       // Verified sender or domain
 const EMAIL_FROM_NAME = (process.env.EMAIL_FROM_NAME || 'Cyber Kingdom of Christ').trim()
-const POSTMARK_STREAM = (process.env.POSTMARK_STREAM || 'outreach').trim()     // ← must match your Stream ID exactly
+const POSTMARK_STREAM = (process.env.POSTMARK_STREAM || 'outreach').trim()     // must match your Stream ID
 const POSTMARK_TEMPLATE_ALIAS = (process.env.POSTMARK_TEMPLATE_ALIAS || 'ckoc-outreach-v1').trim()
 
 const SITE_URL = (process.env.SITE_URL || 'https://cyberkingdomofchrist.netlify.app').trim()
@@ -20,6 +22,7 @@ const ADMIN_SECRET = process.env.CKOC_ADMIN_SECRET
 
 // ────────────────────────────────────────────────────────────────────────────
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+const supabasePublic = SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types/Helpers
@@ -49,6 +52,7 @@ function greetingOnly(office: string | null, name: string): string {
 function withGreeting(office: string | null, name: string, body: string): string {
   return `${greetingOnly(office, name)}\n\n${body || ''}`
 }
+
 /** Accept email as text[] or a Postgres array-literal string like "{a@b,c@d}". */
 function normalizeEmails(val: unknown): string[] {
   if (Array.isArray(val)) {
@@ -64,6 +68,7 @@ function allowedChannelsForTier(_tier: Tier | null): Set<string> {
   return new Set(['email'])
 }
 
+// Cache user tier lookups
 const tierCache = new Map<string, Tier>()
 async function getUserTier(userId: string): Promise<Tier> {
   const cached = tierCache.get(userId)
@@ -82,7 +87,7 @@ async function getAuthorMeta(userId: string): Promise<{ email: string | null; zi
   try {
     const { data, error } = await supabase.auth.admin.getUserById(userId)
     if (!error && data?.user?.email) email = data.user.email
-  } catch {/* ignore */}
+  } catch { /* ignore */ }
 
   try {
     const { data } = await supabase
@@ -91,7 +96,7 @@ async function getAuthorMeta(userId: string): Promise<{ email: string | null; zi
       .eq('id', userId)
       .maybeSingle()
     zip = (data as any)?.primary_zip ?? (data as any)?.zip ?? (data as any)?.postal_code ?? null
-  } catch {/* ignore */}
+  } catch { /* ignore */ }
 
   return { email, zip }
 }
@@ -113,6 +118,31 @@ async function getQueued(limit = 50) {
 
   if (error) throw new Error(error.message)
   return data || []
+}
+
+async function getSingleForUser(
+  userId: string,
+  opts: { request_id?: string; prayer_id?: string }
+) {
+  let query = supabase
+    .from('outreach_requests')
+    .select(`
+      id, user_id, prayer_id, target_rep_id, channels, status, subject, body,
+      representatives:target_rep_id ( id, name, office, email ),
+      prayers:prayer_id ( content )
+    `)
+    .eq('user_id', userId)
+    .contains('channels', ['email'])
+    .limit(1)
+
+  if (opts.request_id) query = query.eq('id', opts.request_id)
+  if (!opts.request_id && opts.prayer_id) {
+    query = query.eq('prayer_id', opts.prayer_id).eq('status', 'queued').order('created_at', { ascending: false })
+  }
+
+  const { data, error } = await query.maybeSingle()
+  if (error) throw new Error(error.message)
+  return data
 }
 
 async function markSent(id: string) {
@@ -149,10 +179,7 @@ async function postmarkFetch(path: string, payload: Record<string, any>): Promis
     body: JSON.stringify(payload),
   })
 
-  // Attempt to parse JSON either way (success or error)
   const json = (await res.json().catch(() => ({}))) as Partial<PostmarkSendResponse> & { Message?: string; ErrorCode?: number }
-
-  // Postmark success = HTTP 200 and ErrorCode === 0
   const ok = res.ok && (json?.ErrorCode ?? 0) === 0
   if (!ok) {
     const msg = json?.Message || `HTTP ${res.status}`
@@ -161,13 +188,12 @@ async function postmarkFetch(path: string, payload: Record<string, any>): Promis
   return json as PostmarkSendResponse
 }
 
-// replace the function signature
 async function sendWithPostmark(params: {
   to: string
   subject: string
   html?: string | null
   text?: string | null
-  replyTo?: string | null            // ← add this
+  replyTo?: string | null
   template?: {
     alias: string
     model: Record<string, any>
@@ -182,7 +208,7 @@ async function sendWithPostmark(params: {
       TemplateAlias: params.template.alias,
       TemplateModel: params.template.model,
       MessageStream: POSTMARK_STREAM,
-      ReplyTo: params.replyTo || undefined,   // ← add this
+      ReplyTo: params.replyTo || undefined,
     })
   }
 
@@ -193,11 +219,12 @@ async function sendWithPostmark(params: {
     HtmlBody: params.html || undefined,
     TextBody: params.text || undefined,
     MessageStream: POSTMARK_STREAM,
-    ReplyTo: params.replyTo || undefined,     // ← add this
+    ReplyTo: params.replyTo || undefined,
   })
 }
 
-
+// ────────────────────────────────────────────────────────────────────────────
+// Core send (shared by batch + single)
 // ────────────────────────────────────────────────────────────────────────────
 type DispatchDetail = {
   request_id: string
@@ -209,7 +236,115 @@ type DispatchDetail = {
   error?: string
 }
 
-// Deliver logic
+async function sendOneRow(row: any): Promise<DispatchDetail> {
+  const rep = row.representatives as { id: string; name: string; office: string | null; email: unknown } | null
+  if (!rep) {
+    await markFailed(row.id, 'Representative not found')
+    return {
+      request_id: row.id,
+      to: '(none)',
+      used_stream: POSTMARK_STREAM,
+      used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
+      status: 'failed',
+      error: 'Representative not found',
+    }
+  }
+
+  // 1) Tier enforcement (future proof)
+  const tier = await getUserTier(row.user_id)
+  const allowed = allowedChannelsForTier(tier)
+  const requested: string[] = row.channels || []
+  const disallowed = requested.filter((ch) => !allowed.has(ch))
+  if (disallowed.length) {
+    const msg = `Channel(s) not allowed for tier '${tier}': ${disallowed.join(', ')}`
+    await markFailed(row.id, msg)
+    return {
+      request_id: row.id,
+      to: '(none)',
+      used_stream: POSTMARK_STREAM,
+      used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
+      status: 'failed',
+      error: msg,
+    }
+  }
+
+  // 2) Resolve recipient email
+  const emails = normalizeEmails(rep.email)
+  const toEmail = emails[0] ?? null
+  if (!toEmail) {
+    await markFailed(row.id, 'No email on file for representative')
+    return {
+      request_id: row.id,
+      to: '(none)',
+      used_stream: POSTMARK_STREAM,
+      used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
+      status: 'failed',
+      error: 'No email on file for representative',
+    }
+  }
+
+  // 3) Compose (greeting + body/prayer)
+  const subject = row.subject || 'Message from a Cyber Kingdom of Christ user'
+  const greeting = greetingOnly(rep.office, (rep as any).name)
+  const prayerText: string = row.body || row?.prayers?.content || ''
+
+  // 4) Optional author metadata (for template fields + Reply-To)
+  const { email: authorEmail, zip: authorZip } = await getAuthorMeta(row.user_id)
+
+  // 5) Send (template if available, else HTML/text)
+  try {
+    let resp: PostmarkSendResponse | undefined
+
+    if (POSTMARK_TEMPLATE_ALIAS) {
+      resp = await sendWithPostmark({
+        to: toEmail,
+        subject, // ignored by Postmark template (subject comes from template)
+        replyTo: authorEmail || null,
+        template: {
+          alias: POSTMARK_TEMPLATE_ALIAS,
+          model: {
+            subject,
+            recipient_name: rep.name,
+            recipient_office: rep.office || '',
+            greeting,
+            prayer_text: prayerText,
+            author_email: authorEmail || '',
+            author_zip: authorZip || '',
+            site_url: SITE_URL,
+          },
+        },
+      })
+    } else {
+      const text = withGreeting(rep.office, (rep as any).name, prayerText)
+      const html = renderEmailHTML({ subject, greeting, body: prayerText })
+      resp = await sendWithPostmark({ to: toEmail, subject, html, text, replyTo: authorEmail || null })
+    }
+
+    await markSent(row.id)
+    return {
+      request_id: row.id,
+      to: toEmail,
+      message_id: resp?.MessageID,
+      used_stream: POSTMARK_STREAM,
+      used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
+      status: 'sent',
+    }
+  } catch (e: any) {
+    const err = String(e?.message || 'Send failed')
+    await markFailed(row.id, err)
+    return {
+      request_id: row.id,
+      to: toEmail,
+      used_stream: POSTMARK_STREAM,
+      used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
+      status: 'failed',
+      error: err,
+    }
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Batch deliver (admin-triggered)
 // ────────────────────────────────────────────────────────────────────────────
 async function deliverQueued(): Promise<{
   processed: number
@@ -228,98 +363,10 @@ async function deliverQueued(): Promise<{
 
   for (const row of batch as any[]) {
     processed += 1
-
-    const rep = row.representatives as { id: string; name: string; office: string | null; email: unknown } | null
-    if (!rep) {
-      await markFailed(row.id, 'Representative not found')
-      failed++
-      details.push({ request_id: row.id, to: '(none)', used_stream: POSTMARK_STREAM, used_template_alias: POSTMARK_TEMPLATE_ALIAS || null, status: 'failed', error: 'Representative not found' })
-      continue
-    }
-
-    // 1) Tier enforcement
-    const tier = await getUserTier(row.user_id)
-    const allowed = allowedChannelsForTier(tier)
-    const requested: string[] = row.channels || []
-    const disallowed = requested.filter((ch) => !allowed.has(ch))
-    if (disallowed.length) {
-      const msg = `Channel(s) not allowed for tier '${tier}': ${disallowed.join(', ')}`
-      await markFailed(row.id, msg)
-      failed++
-      details.push({ request_id: row.id, to: '(none)', used_stream: POSTMARK_STREAM, used_template_alias: POSTMARK_TEMPLATE_ALIAS || null, status: 'failed', error: msg })
-      continue
-    }
-
-    // 2) Resolve recipient email
-    const emails = normalizeEmails(rep.email)
-    const toEmail = emails[0] ?? null
-    if (!toEmail) {
-      await markFailed(row.id, 'No email on file for representative')
-      failed++
-      details.push({ request_id: row.id, to: '(none)', used_stream: POSTMARK_STREAM, used_template_alias: POSTMARK_TEMPLATE_ALIAS || null, status: 'failed', error: 'No email on file for representative' })
-      continue
-    }
-
-    // 3) Compose (greeting + body/prayer)
-    const subject = row.subject || 'Message from a Cyber Kingdom of Christ user'
-    const greeting = greetingOnly(rep.office, (rep as any).name)
-    const prayerText: string = row.body || row?.prayers?.content || ''
-
-    // 4) Optional author metadata (for template fields)
-    const { email: authorEmail, zip: authorZip } = await getAuthorMeta(row.user_id)
-
-    // 5) Send (template if available, else HTML/text)
-    try {
-      let resp: PostmarkSendResponse | undefined
-
-      if (POSTMARK_TEMPLATE_ALIAS) {
-        resp = await sendWithPostmark({
-          to: toEmail,
-          subject, // ignored by Postmark template (subject comes from template)
-          replyTo: authorEmail || null,
-          template: {
-            alias: POSTMARK_TEMPLATE_ALIAS,
-            model: {
-              subject, // in case your template uses it
-              recipient_name: rep.name,
-              recipient_office: rep.office || '',
-              greeting,
-              prayer_text: prayerText,
-              author_email: authorEmail || '',
-              author_zip: authorZip || '',
-              site_url: SITE_URL,
-            },
-          },
-        })
-      } else {
-        const text = withGreeting(rep.office, (rep as any).name, prayerText)
-        const html = renderEmailHTML({ subject, greeting, body: prayerText })
-        resp = await sendWithPostmark({ to: toEmail, subject, html, text, replyTo: authorEmail || null, })
-      }
-
-      await markSent(row.id)
-      sent += 1
-      details.push({
-        request_id: row.id,
-        to: toEmail,
-        message_id: resp?.MessageID,
-        used_stream: POSTMARK_STREAM,
-        used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
-        status: 'sent',
-      })
-    } catch (e: any) {
-      const err = String(e?.message || 'Send failed')
-      await markFailed(row.id, err)
-      failed += 1
-      details.push({
-        request_id: row.id,
-        to: toEmail,
-        used_stream: POSTMARK_STREAM,
-        used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
-        status: 'failed',
-        error: err,
-      })
-    }
+    const result = await sendOneRow(row)
+    details.push(result)
+    if (result.status === 'sent') sent += 1
+    else failed += 1
   }
 
   return {
@@ -333,12 +380,58 @@ async function deliverQueued(): Promise<{
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Single deliver (user-triggered, requires Authorization Bearer token)
+// ────────────────────────────────────────────────────────────────────────────
+async function deliverSingle(
+  authHeader: string | undefined,
+  opts: { request_id?: string; prayer_id?: string }
+) {
+  if (!POSTMARK_SERVER_TOKEN) throw new Error('POSTMARK_SERVER_TOKEN missing')
+  if (!EMAIL_FROM) throw new Error('EMAIL_FROM missing')
+
+  if (!supabasePublic) throw new Error('SUPABASE_ANON_KEY missing for JWT verification')
+
+  // Extract/verify JWT and get user id
+  const token = (authHeader || '').replace(/^Bearer\s+/i, '').trim()
+  if (!token) {
+    return { statusCode: 401, body: JSON.stringify({ error: 'Missing Authorization Bearer token' }) }
+  }
+  const { data: userResp, error: userErr } = await supabasePublic.auth.getUser(token)
+  if (userErr || !userResp?.user?.id) {
+    return { statusCode: 401, body: JSON.stringify({ error: 'Invalid token' }) }
+  }
+  const userId = userResp.user.id
+
+  // Fetch the specific queued request that belongs to this user
+  const row = await getSingleForUser(userId, { request_id: opts.request_id, prayer_id: opts.prayer_id })
+  if (!row) {
+    return { statusCode: 404, body: JSON.stringify({ error: 'No matching queued request found' }) }
+  }
+  if (row.status !== 'queued') {
+    return { statusCode: 409, body: JSON.stringify({ error: `Request is not queued (status=${row.status})` }) }
+  }
+
+  // Send it
+  const result = await sendOneRow(row)
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      ok: true,
+      used_stream: POSTMARK_STREAM,
+      used_template_alias: POSTMARK_TEMPLATE_ALIAS || null,
+      detail: result,
+    }),
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Handler
 // ────────────────────────────────────────────────────────────────────────────
 export const handler: Handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, x-ckoc-admin',
+    'Access-Control-Allow-Headers': 'Content-Type, x-ckoc-admin, Authorization',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
   }
 
@@ -349,21 +442,20 @@ export const handler: Handler = async (event) => {
     return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method not allowed' }) }
   }
 
-  const adminHeader = event.headers['x-ckoc-admin'] || event.headers['X-Ckoc-Admin']
-  const isAdminOK = ADMIN_SECRET ? adminHeader === ADMIN_SECRET : true
-  if (!isAdminOK) {
-    return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) }
-  }
-
   try {
     const payload = JSON.parse(event.body || '{}')
+    const adminHeader = event.headers['x-ckoc-admin'] || event.headers['X-Ckoc-Admin']
+    const isAdminOK = ADMIN_SECRET ? adminHeader === ADMIN_SECRET : true
 
+    // Admin-only batch actions
     if (payload.action === 'deliver_queued') {
+      if (!isAdminOK) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) }
       const result = await deliverQueued()
       return { statusCode: 200, headers, body: JSON.stringify({ ok: true, ...result }) }
     }
 
     if (payload.action === 'mark_sent') {
+      if (!isAdminOK) return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) }
       const ids: string[] = Array.isArray(payload.ids) ? payload.ids : []
       if (!ids.length) {
         return { statusCode: 400, headers, body: JSON.stringify({ error: 'No ids provided' }) }
@@ -378,8 +470,18 @@ export const handler: Handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ ok: true, updated: ids.length }) }
     }
 
+    // User-triggered single send (requires Authorization Bearer token)
+    if (payload.action === 'deliver_single') {
+      const authHeader = event.headers['authorization'] || event.headers['Authorization']
+      const resp = await deliverSingle(authHeader as string | undefined, {
+        request_id: typeof payload.request_id === 'string' ? payload.request_id : undefined,
+        prayer_id: typeof payload.prayer_id === 'string' ? payload.prayer_id : undefined,
+      })
+      return { ...resp, headers }
+    }
+
+    // Placeholder for future actions
     if (payload.action === 'group_invitation') {
-      // placeholder – your group invitation logic can reuse sendWithPostmark if needed
       return { statusCode: 200, headers, body: JSON.stringify({ ok: true }) }
     }
 
