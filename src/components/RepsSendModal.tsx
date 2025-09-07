@@ -1,8 +1,9 @@
 // src/components/RepsSendModal.tsx
+
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { assignRepsForCurrentUser } from '@/lib/reps';
-import { outreach, type OutreachChannel } from '@/lib/outreach';
+import { outreach, type OutreachChannel, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
 
 type Rep = {
@@ -238,6 +239,7 @@ CyberKingdomOfChrist.org`;
         subject,
         body,
       });
+      await deliverSingleByPrayerId(prayerId);
 
       setBusy(false);
       if (res.error) {

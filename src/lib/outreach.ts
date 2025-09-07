@@ -1,4 +1,5 @@
 // src/lib/outreach.ts
+
 import { supabase } from '@/lib/supabase';
 import type { Database } from '@/types/database';
 import { assignRepsForCurrentUser } from '@/lib/reps';
@@ -369,3 +370,38 @@ export const outreach = {
     return { data: json, error: null };
   },
 };
+// ────────────────────────────────────────────────────────────────────────────
+// APPEND: deliver a single queued outreach for a given prayer (user-authenticated)
+// Requires the server-side `deliver_single` action we just added.
+// ────────────────────────────────────────────────────────────────────────────
+
+export async function deliverSingleByPrayerId(prayerId: string) {
+  if (!prayerId) throw new Error('Missing prayerId');
+
+  // Get the user’s JWT (supabase-js v2)
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  if (!token) throw new Error('Not signed in');
+
+  const res = await fetch('/.netlify/functions/outreach-processor', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ action: 'deliver_single', prayer_id: prayerId }),
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json?.error) {
+    throw new Error(json?.error || 'Send failed');
+  }
+  return json as {
+    ok: true;
+    used_stream: string;
+    used_template_alias: string | null;
+    detail: { request_id: string; status: 'sent' | 'failed'; message_id?: string; error?: string };
+  };
+}
+
+
