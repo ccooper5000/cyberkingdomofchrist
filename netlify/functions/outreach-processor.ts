@@ -161,11 +161,13 @@ async function postmarkFetch(path: string, payload: Record<string, any>): Promis
   return json as PostmarkSendResponse
 }
 
+// replace the function signature
 async function sendWithPostmark(params: {
   to: string
   subject: string
   html?: string | null
   text?: string | null
+  replyTo?: string | null            // ← add this
   template?: {
     alias: string
     model: Record<string, any>
@@ -173,27 +175,28 @@ async function sendWithPostmark(params: {
 }) {
   const From = EMAIL_FROM_NAME ? `${EMAIL_FROM_NAME} <${EMAIL_FROM}>` : EMAIL_FROM
 
-  // Prefer template if provided
   if (params.template?.alias) {
     return postmarkFetch('/email/withTemplate', {
       From,
       To: params.to,
       TemplateAlias: params.template.alias,
       TemplateModel: params.template.model,
-      MessageStream: POSTMARK_STREAM, // ← critical
+      MessageStream: POSTMARK_STREAM,
+      ReplyTo: params.replyTo || undefined,   // ← add this
     })
   }
 
-  // Fallback to raw subject/body send
   return postmarkFetch('/email', {
     From,
     To: params.to,
     Subject: params.subject,
     HtmlBody: params.html || undefined,
     TextBody: params.text || undefined,
-    MessageStream: POSTMARK_STREAM, // ← critical
+    MessageStream: POSTMARK_STREAM,
+    ReplyTo: params.replyTo || undefined,     // ← add this
   })
 }
+
 
 // ────────────────────────────────────────────────────────────────────────────
 type DispatchDetail = {
@@ -273,6 +276,7 @@ async function deliverQueued(): Promise<{
         resp = await sendWithPostmark({
           to: toEmail,
           subject, // ignored by Postmark template (subject comes from template)
+          replyTo: authorEmail || null,
           template: {
             alias: POSTMARK_TEMPLATE_ALIAS,
             model: {
@@ -290,7 +294,7 @@ async function deliverQueued(): Promise<{
       } else {
         const text = withGreeting(rep.office, (rep as any).name, prayerText)
         const html = renderEmailHTML({ subject, greeting, body: prayerText })
-        resp = await sendWithPostmark({ to: toEmail, subject, html, text })
+        resp = await sendWithPostmark({ to: toEmail, subject, html, text, replyTo: authorEmail || null, })
       }
 
       await markSent(row.id)
