@@ -1,7 +1,8 @@
 // netlify/functions/outreach-processor.ts
 import type { Handler } from '@netlify/functions'
 import { createClient } from '@supabase/supabase-js'
-import { renderEmailHTML } from './email-template'
+import { renderEmailHTML } from '../lib/email-template'
+
 
 // ────────────────────────────────────────────────────────────────────────────
 // ENV
