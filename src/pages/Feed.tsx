@@ -115,9 +115,21 @@ export default function Feed() {
       <AuthMessages />
 
       <div className="max-w-3xl mx-auto px-4 space-y-6">
-        {/* Who's logged in */}
-        <div className="flex justify-end">
+        {/* Who's logged in + explicit auth actions */}
+        <div className="flex justify-end items-center gap-3">
           <UserAvatarChip />
+          {!authLoading && !user && (
+            <Link to="/login" className="text-sm underline">Log in</Link>
+          )}
+          {!authLoading && user && (
+            <button
+              type="button"
+              onClick={() => supabase.auth.signOut()}
+              className="text-sm underline"
+            >
+              Log out
+            </button>
+          )}
         </div>
 
         {/* Inline composer */}
@@ -193,7 +205,7 @@ export default function Feed() {
                   {new Date(p.created_at).toLocaleString()}
                 </div>
                 <div className="mt-1 text-[11px] uppercase tracking-wide text-gray-600">
-                  {p.category.replace('_', ' ')}
+                  {String(p.category ?? 'uncategorized').replace('_', ' ')}
                 </div>
                 <p className="mt-2 whitespace-pre-wrap">{p.content}</p>
 
@@ -227,6 +239,7 @@ function LikeControl({ prayerId }: { prayerId: string }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Load current user's like state
   useEffect(() => {
     let mounted = true;
     async function loadLiked() {
@@ -250,6 +263,7 @@ function LikeControl({ prayerId }: { prayerId: string }) {
     };
   }, [prayerId, user?.id]);
 
+  // Load like count via RPC
   useEffect(() => {
     let mounted = true;
     async function loadCount() {
@@ -468,7 +482,6 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
                     {new Date(c.created_at).toLocaleString()}
                   </div>
                   <p className="mt-1 text-sm whitespace-pre-wrap">{c.content}</p>
-
                   <CommentLikeControl commentId={c.id} />
                 </div>
               ))}
