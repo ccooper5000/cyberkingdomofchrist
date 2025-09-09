@@ -29,6 +29,7 @@ function App() {
             <Route path="feed" element={<Feed />} />
             <Route path="pricing" element={<Pricing />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="profile" element={<Settings />} />
             <Route path="groups" element={<Groups />} />
             <Route path="circles" element={<Circles />} />
             <Route path="privacy" element={<Privacy />} />
