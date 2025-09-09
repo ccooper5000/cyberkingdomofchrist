@@ -7,6 +7,7 @@ import FlashBanner from '@/components/FlashBanner';
 import { Heart } from 'lucide-react';
 import SendToRepsButton from '@/components/SendToRepsButton';
 import SendToPresidentButton from '@/components/SendToPresidentButton';
+import UserAvatarChip from '@/components/UserAvatarChip';
 
 /** Keep types simple & runtime-safe */
 type FeedPrayer = {
@@ -127,16 +128,17 @@ export default function Feed() {
       <div className="max-w-3xl mx-auto px-4 space-y-6">
         {/* Auth controls always visible based on user presence */}
         <div className="flex justify-end items-center gap-3">
-          {!user ? (
-            <Link to="/login" className="text-sm underline">Log in</Link>
-          ) : (
-            <button
-              type="button"
-              onClick={() => supabase.auth.signOut()}
-              className="text-sm underline"
-            >
-              Log out
-            </button>
+  <UserAvatarChip /> {/* renders nothing if signed out */}
+  {!user ? (
+    <Link to="/login" className="text-sm underline">Log in</Link>
+  ) : (
+    <button
+      type="button"
+      onClick={() => supabase.auth.signOut()}
+      className="text-sm underline"
+    >
+      Log out
+    </button>
           )}
         </div>
 
@@ -151,7 +153,7 @@ export default function Feed() {
 
           {!user ? (
             <div className="text-sm text-gray-600">
-              Please <Link to="/login" className="underline">log in</Link> to post a prayer.
+              Please <Link to="/login" className="underline">Log in</Link> to post a prayer.
             </div>
           ) : (
             <form onSubmit={handlePost} className="space-y-3">
