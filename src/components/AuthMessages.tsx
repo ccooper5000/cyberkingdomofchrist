@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
 function partOfDay() {
@@ -9,38 +9,52 @@ function partOfDay() {
 export default function AuthMessages() {
   const [text, setText] = useState<string | null>(null);
   const [variant, setVariant] = useState<'in' | 'out'>('in');
+  const hideTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
-      try {
-        if (event === 'SIGNED_IN' && session?.user) {
-          const u = session.user;
-          let display = u.email ?? 'Friend';
-          // Try to use profile.username if present
-          const { data } = await supabase
-            .from('profiles')
-            .select('username')
-            .eq('id', u.id)
-            .maybeSingle();
-          if (data?.username) display = data.username;
+    // IMPORTANT: non-async listener, no DB calls, robust cleanup
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      // clear any pending hide
+      if (hideTimer.current) {
+        window.clearTimeout(hideTimer.current);
+        hideTimer.current = null;
+      }
 
+      if (event === 'SIGNED_IN' && session?.user) {
+        const u = session.user;
+        // Prefer user_metadata names; fall back to email; cache for logout message
+        const display =
+          (u.user_metadata && (u.user_metadata.username || u.user_metadata.full_name || u.user_metadata.name)) ||
+          u.email ||
+          'Friend';
+        try {
           localStorage.setItem('ckoc_last_display_name', display);
-          setVariant('in');
-          setText(`Welcome, ${display}.`);
-        } else if (event === 'SIGNED_OUT') {
-          const name = localStorage.getItem('ckoc_last_display_name') || 'Friend';
-          setVariant('out');
-          setText(`You are now signed out, ${name}. Have a blessed ${partOfDay()}.`);
-        }
-      } catch (e) {
-        console.error('AuthMessages handler error:', e);
-      } finally {
-        // Auto-hide after a few seconds
-        setTimeout(() => setText(null), 4500);
+        } catch {}
+        setVariant('in');
+        setText(`Welcome, ${display}.`);
+        hideTimer.current = window.setTimeout(() => setText(null), 4500) as unknown as number;
+      }
+
+      if (event === 'SIGNED_OUT') {
+        let name = 'Friend';
+        try {
+          name = localStorage.getItem('ckoc_last_display_name') || 'Friend';
+        } catch {}
+        setVariant('out');
+        setText(`You are now signed out, ${name}. Have a blessed ${partOfDay()}.`);
+        hideTimer.current = window.setTimeout(() => setText(null), 4500) as unknown as number;
       }
     });
 
-    return () => sub.subscription.unsubscribe();
+    return () => {
+      if (hideTimer.current) {
+        window.clearTimeout(hideTimer.current);
+        hideTimer.current = null;
+      }
+      subscription?.unsubscribe();
+    };
   }, []);
 
   if (!text) return null;
