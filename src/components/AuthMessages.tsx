@@ -6,13 +6,24 @@ function partOfDay() {
   return h >= 18 || h < 5 ? 'evening' : 'day';
 }
 
+function getDisplayName(u: any): string {
+  const m = u?.user_metadata || {};
+  return m.username || m.full_name || m.name || u?.email || 'Friend';
+}
+
+function lsGet(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function lsSet(key: string, val: string) {
+  try { localStorage.setItem(key, val); } catch {}
+}
+
 export default function AuthMessages() {
   const [text, setText] = useState<string | null>(null);
   const [variant, setVariant] = useState<'in' | 'out'>('in');
   const hideTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    // IMPORTANT: non-async listener, no DB calls, robust cleanup
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
@@ -22,26 +33,37 @@ export default function AuthMessages() {
         hideTimer.current = null;
       }
 
+      const lastState = lsGet('ckoc_last_auth_state'); // 'signed_in' | 'signed_out' | null
+
       if (event === 'SIGNED_IN' && session?.user) {
-        const u = session.user;
-        // Prefer user_metadata names; fall back to email; cache for logout message
-        const display =
-          (u.user_metadata && (u.user_metadata.username || u.user_metadata.full_name || u.user_metadata.name)) ||
-          u.email ||
-          'Friend';
-        try {
-          localStorage.setItem('ckoc_last_display_name', display);
-        } catch {}
+        const name = getDisplayName(session.user);
+        lsSet('ckoc_last_display_name', name);
+        lsSet('ckoc_last_auth_state', 'signed_in');
         setVariant('in');
-        setText(`Welcome, ${display}.`);
+        setText(`Welcome, ${name}.`);
         hideTimer.current = window.setTimeout(() => setText(null), 4500) as unknown as number;
       }
 
+      // When the page mounts after a login redirect, we get INITIAL_SESSION (not SIGNED_IN)
+      if (event === 'INITIAL_SESSION') {
+        if (session?.user) {
+          const name = getDisplayName(session.user);
+          lsSet('ckoc_last_display_name', name);
+          // Only show Welcome if we weren't already signed in previously
+          if (lastState !== 'signed_in') {
+            setVariant('in');
+            setText(`Welcome, ${name}.`);
+            hideTimer.current = window.setTimeout(() => setText(null), 4500) as unknown as number;
+          }
+          lsSet('ckoc_last_auth_state', 'signed_in');
+        } else {
+          lsSet('ckoc_last_auth_state', 'signed_out');
+        }
+      }
+
       if (event === 'SIGNED_OUT') {
-        let name = 'Friend';
-        try {
-          name = localStorage.getItem('ckoc_last_display_name') || 'Friend';
-        } catch {}
+        const name = lsGet('ckoc_last_display_name') || 'Friend';
+        lsSet('ckoc_last_auth_state', 'signed_out');
         setVariant('out');
         setText(`You are now signed out, ${name}. Have a blessed ${partOfDay()}.`);
         hideTimer.current = window.setTimeout(() => setText(null), 4500) as unknown as number;
