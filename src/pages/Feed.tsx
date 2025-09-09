@@ -7,14 +7,15 @@ import FlashBanner from '@/components/FlashBanner';
 import { Heart } from 'lucide-react';
 import SendToRepsButton from '@/components/SendToRepsButton';
 import SendToPresidentButton from '@/components/SendToPresidentButton';
-import type { Database } from '@/types/database';
-import UserAvatarChip from '@/components/UserAvatarChip';
-import AuthMessages from '@/components/AuthMessages';
 
-type FeedPrayer = Pick<
-  Database['public']['Tables']['prayers']['Row'],
-  'id' | 'author_id' | 'content' | 'category' | 'created_at'
->;
+/** Keep types simple & runtime-safe */
+type FeedPrayer = {
+  id: string;
+  author_id: string;
+  content: string;
+  category: string | null;
+  created_at: string;
+};
 
 type Category =
   | 'trump_politics'
@@ -33,7 +34,7 @@ type CommentRow = {
 };
 
 export default function Feed() {
-  const { user, loading: authLoading } = useAuth();
+  const { user } = useAuth();
   const [items, setItems] = useState<FeedPrayer[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -46,25 +47,29 @@ export default function Feed() {
   useEffect(() => {
     let mounted = true;
 
-    async function load() {
+    (async () => {
       setLoading(true);
-      const { data, error } = await supabase
-        .from('prayers')
-        .select('id, author_id, content, category, created_at')
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (!mounted) return;
-      if (error) {
-        console.error('Feed load error:', error);
-        setItems([]);
-      } else {
-        setItems((data ?? []) as FeedPrayer[]);
+      try {
+        const { data, error } = await supabase
+          .from('prayers')
+          .select('id, author_id, content, category, created_at')
+          .order('created_at', { ascending: false })
+          .limit(50);
+        if (!mounted) return;
+        if (error) {
+          console.error('Feed load error:', error);
+          setItems([]);
+        } else {
+          setItems((data ?? []) as FeedPrayer[]);
+        }
+      } catch (e) {
+        if (mounted) setItems([]);
+        console.error('Feed load exception:', e);
+      } finally {
+        if (mounted) setLoading(false);
       }
-      setLoading(false);
-    }
+    })();
 
-    load();
     return () => {
       mounted = false;
     };
@@ -81,47 +86,50 @@ export default function Feed() {
     }
 
     setPosting(true);
-    const { data, error } = await supabase
-      .from('prayers')
-      .insert({
-        author_id: user.id,
-        category,
-        content: content.trim(),
-        visibility: 'public',
-        group_id: null,
-        circle_id: null,
-        is_featured: false,
-      })
-      .select('id, author_id, content, category, created_at')
-      .single();
-    setPosting(false);
+    try {
+      const { data, error } = await supabase
+        .from('prayers')
+        .insert({
+          author_id: user.id,
+          category,
+          content: content.trim(),
+          visibility: 'public',
+          group_id: null,
+          circle_id: null,
+          is_featured: false,
+        })
+        .select('id, author_id, content, category, created_at')
+        .single();
 
-    if (error) {
-      console.error('Post error:', error);
-      setPostError(error.message || 'Could not post your prayer.');
-      return;
-    }
+      if (error) {
+        console.error('Post error:', error);
+        setPostError(error.message || 'Could not post your prayer.');
+        return;
+      }
 
-    if (data) {
-      setItems((prev) => [data as FeedPrayer, ...prev]);
-      setContent('');
-      setCategory('national');
+      if (data) {
+        setItems((prev) => [data as FeedPrayer, ...prev]);
+        setContent('');
+        setCategory('national');
+      }
+    } catch (e) {
+      console.error('Post exception:', e);
+      setPostError('Could not post your prayer.');
+    } finally {
+      setPosting(false);
     }
   }
 
   return (
     <div className="min-h-screen pt-24">
       <FlashBanner />
-      <AuthMessages />
 
       <div className="max-w-3xl mx-auto px-4 space-y-6">
-        {/* Who's logged in + explicit auth actions */}
+        {/* Auth controls always visible based on user presence */}
         <div className="flex justify-end items-center gap-3">
-          <UserAvatarChip />
-          {!authLoading && !user && (
+          {!user ? (
             <Link to="/login" className="text-sm underline">Log in</Link>
-          )}
-          {!authLoading && user && (
+          ) : (
             <button
               type="button"
               onClick={() => supabase.auth.signOut()}
@@ -141,7 +149,7 @@ export default function Feed() {
             </Link>
           </div>
 
-          {!user && !authLoading ? (
+          {!user ? (
             <div className="text-sm text-gray-600">
               Please <Link to="/login" className="underline">log in</Link> to post a prayer.
             </div>
@@ -209,7 +217,7 @@ export default function Feed() {
                 </div>
                 <p className="mt-2 whitespace-pre-wrap">{p.content}</p>
 
-                {/* Actions stacked so the replies composer can use full width */}
+                {/* Actions */}
                 <div className="mt-2 flex flex-col gap-2">
                   <LikeControl prayerId={p.id} />
                   {user?.id === p.author_id && (
@@ -229,9 +237,7 @@ export default function Feed() {
   );
 }
 
-/**
- * LikeControl: toggle like/unlike for the current user on this prayer + show count.
- */
+/** LikeControl */
 function LikeControl({ prayerId }: { prayerId: string }) {
   const { user } = useAuth();
   const [liked, setLiked] = useState(false);
@@ -239,10 +245,9 @@ function LikeControl({ prayerId }: { prayerId: string }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Load current user's like state
   useEffect(() => {
     let mounted = true;
-    async function loadLiked() {
+    (async () => {
       setErr(null);
       if (!user) return;
       const { data, error } = await supabase
@@ -256,27 +261,20 @@ function LikeControl({ prayerId }: { prayerId: string }) {
         console.error('Load like error:', error);
       }
       setLiked(!!data);
-    }
-    loadLiked();
-    return () => {
-      mounted = false;
-    };
+    })();
+    return () => { mounted = false; };
   }, [prayerId, user?.id]);
 
-  // Load like count via RPC
   useEffect(() => {
     let mounted = true;
-    async function loadCount() {
+    (async () => {
       const { data, error } = await (supabase as any).rpc('count_prayer_likes', {
         p_prayer_id: prayerId,
       });
       if (!mounted) return;
       if (!error) setCount((data as number) ?? 0);
-    }
-    loadCount();
-    return () => {
-      mounted = false;
-    };
+    })();
+    return () => { mounted = false; };
   }, [prayerId]);
 
   async function toggleLike() {
@@ -341,9 +339,7 @@ function LikeControl({ prayerId }: { prayerId: string }) {
   );
 }
 
-/**
- * RepliesSection: shows a toggle with a live count, loads replies, and has a small composer.
- */
+/** RepliesSection */
 function RepliesSection({ prayerId }: { prayerId: string }) {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
@@ -357,18 +353,15 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
 
   useEffect(() => {
     let mounted = true;
-    async function loadCount() {
+    (async () => {
       const { count, error } = await supabase
         .from('prayer_comments')
         .select('id', { count: 'exact', head: true })
         .eq('prayer_id', prayerId);
       if (!mounted) return;
       if (!error) setReplyCount(count ?? 0);
-    }
-    loadCount();
-    return () => {
-      mounted = false;
-    };
+    })();
+    return () => { mounted = false; };
   }, [prayerId]);
 
   async function loadIfNeeded() {
@@ -377,21 +370,24 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
 
     setLoading(true);
     setError(null);
-    const { data, error } = await supabase
-      .from('prayer_comments')
-      .select('id, prayer_id, author_id, content, created_at')
-      .eq('prayer_id', prayerId)
-      .order('created_at', { ascending: false })
-      .limit(20);
+    try {
+      const { data, error } = await supabase
+        .from('prayer_comments')
+        .select('id, prayer_id, author_id, content, created_at')
+        .eq('prayer_id', prayerId)
+        .order('created_at', { ascending: false })
+        .limit(20);
 
-    if (error) {
-      setError(error.message || 'Could not load replies.');
-      setItems([]);
-    } else {
-      setItems((data ?? []) as CommentRow[]);
-      if (replyCount === 0) setReplyCount((data ?? []).length);
+      if (error) {
+        setError(error.message || 'Could not load replies.');
+        setItems([]);
+      } else {
+        setItems((data ?? []) as CommentRow[]);
+        if (replyCount === 0) setReplyCount((data ?? []).length);
+      }
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   async function handleReply(e: React.FormEvent) {
@@ -405,27 +401,29 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
     setError(null);
     setPosting(true);
 
-    const { data, error } = await supabase
-      .from('prayer_comments')
-      .insert({
-        prayer_id: prayerId,
-        author_id: user.id,
-        content: content.trim(),
-      })
-      .select('id, prayer_id, author_id, content, created_at')
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('prayer_comments')
+        .insert({
+          prayer_id: prayerId,
+          author_id: user.id,
+          content: content.trim(),
+        })
+        .select('id, prayer_id, author_id, content, created_at')
+        .single();
 
-    setPosting(false);
+      if (error) {
+        setError(error.message || 'Could not post your reply.');
+        return;
+      }
 
-    if (error) {
-      setError(error.message || 'Could not post your reply.');
-      return;
-    }
-
-    if (data) {
-      setItems((prev) => [data as CommentRow, ...prev]);
-      setContent('');
-      setReplyCount((n) => n + 1);
+      if (data) {
+        setItems((prev) => [data as CommentRow, ...prev]);
+        setContent('');
+        setReplyCount((n) => n + 1);
+      }
+    } finally {
+      setPosting(false);
     }
   }
 
@@ -493,9 +491,7 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
   );
 }
 
-/**
- * CommentLikeControl: like/unlike for a reply + count via RPC.
- */
+/** CommentLikeControl */
 function CommentLikeControl({ commentId }: { commentId: string }) {
   const { user } = useAuth();
   const [liked, setLiked] = useState(false);
@@ -505,7 +501,7 @@ function CommentLikeControl({ commentId }: { commentId: string }) {
 
   useEffect(() => {
     let mounted = true;
-    async function loadLiked() {
+    (async () => {
       setErr(null);
       if (!user) return;
       const { data, error } = await (supabase as any)
@@ -519,26 +515,20 @@ function CommentLikeControl({ commentId }: { commentId: string }) {
         console.error('Load comment like error:', error);
       }
       setLiked(!!data);
-    }
-    loadLiked();
-    return () => {
-      mounted = false;
-    };
+    })();
+    return () => { mounted = false; };
   }, [commentId, user?.id]);
 
   useEffect(() => {
     let mounted = true;
-    async function loadCount() {
+    (async () => {
       const { data, error } = await (supabase as any).rpc('count_comment_likes', {
         p_comment_id: commentId,
       });
       if (!mounted) return;
       if (!error) setCount((data as number) ?? 0);
-    }
-    loadCount();
-    return () => {
-      mounted = false;
-    };
+    })();
+    return () => { mounted = false; };
   }, [commentId]);
 
   async function toggleLike() {
