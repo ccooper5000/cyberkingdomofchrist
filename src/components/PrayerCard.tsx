@@ -8,6 +8,7 @@ import ShareMenu from '@/components/ShareMenu';
 import Badge from '@/components/Badge';
 import SendToRepsButton from '@/components/SendToRepsButton';
 import type { Database } from '@/types/database';
+import { useAuth } from '@/hooks/useAuth';
 
 // Extend DB row with the extra fields this UI renders.
 type PrayerRow = Database['public']['Tables']['prayers']['Row'];
@@ -22,22 +23,27 @@ interface PrayerCardProps {
 }
 
 export default function PrayerCard({ prayer }: PrayerCardProps) {
+  const { user } = useAuth();
+
   return (
     <Card className="prayer-card relative">
 
-{/* DIAGNOSTIC: Force-visible button wrapper */}
-<div className="absolute top-2 right-2 z-[9999] pointer-events-auto">
-  <div className="mb-1 text-xs bg-yellow-300 text-black font-bold px-2 py-0.5 rounded ring-2 ring-black">
-    DEBUG • Button Area
-  </div>
-  <SendToRepsButton prayerId={prayer.id} className="shadow-2xl" />
-</div>
+      {/* Owner-only diagnostic wrapper (renders only for the author) */}
+      {user?.id === prayer.author_id && (
+        <div className="absolute top-2 right-2 z-[9999] pointer-events-auto">
+          <div className="mb-1 text-xs bg-yellow-300 text-black font-bold px-2 py-0.5 rounded ring-2 ring-black">
+            DEBUG • Button Area
+          </div>
+          <SendToRepsButton prayerId={prayer.id} className="shadow-2xl" />
+        </div>
+      )}
 
-
-      {/* Make the button impossible to miss for now */}
-      <div className="absolute top-3 right-3 z-10">
-        <SendToRepsButton prayerId={prayer.id} />
-      </div>
+      {/* Owner-only: primary send button */}
+      {user?.id === prayer.author_id && (
+        <div className="absolute top-3 right-3 z-10">
+          <SendToRepsButton prayerId={prayer.id} />
+        </div>
+      )}
 
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
