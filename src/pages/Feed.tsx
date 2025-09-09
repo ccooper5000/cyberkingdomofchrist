@@ -8,6 +8,7 @@ import { Heart } from 'lucide-react';
 import SendToRepsButton from '@/components/SendToRepsButton';
 import SendToPresidentButton from '@/components/SendToPresidentButton';
 import UserAvatarChip from '@/components/UserAvatarChip';
+import AuthMessages from '@/components/AuthMessages';
 
 /** Keep types simple & runtime-safe */
 type FeedPrayer = {
@@ -124,6 +125,7 @@ export default function Feed() {
   return (
     <div className="min-h-screen pt-24">
       <FlashBanner />
+      <AuthMessages />
 
       <div className="max-w-3xl mx-auto px-4 space-y-6">
         {/* Auth controls always visible based on user presence */}
