@@ -7,16 +7,21 @@ import FlashBanner from '@/components/FlashBanner';
 import { Heart } from 'lucide-react';
 import SendToRepsButton from '@/components/SendToRepsButton';
 import SendToPresidentButton from '@/components/SendToPresidentButton';
+import type { Database } from '@/types/database';
 
+// Use the DB type and include author_id so we can gate send buttons
+type FeedPrayer = Pick<
+  Database['public']['Tables']['prayers']['Row'],
+  'id' | 'author_id' | 'content' | 'category' | 'created_at'
+>;
 
-type Category = 'trump_politics' | 'health' | 'family' | 'business' | 'national' | 'custom';
-
-type PrayerRow = {
-  id: string;
-  content: string;
-  category: Category;
-  created_at: string;
-};
+type Category =
+  | 'trump_politics'
+  | 'health'
+  | 'family'
+  | 'business'
+  | 'national'
+  | 'custom';
 
 type CommentRow = {
   id: string;
@@ -28,7 +33,7 @@ type CommentRow = {
 
 export default function Feed() {
   const { user, loading: authLoading } = useAuth();
-  const [items, setItems] = useState<PrayerRow[]>([]);
+  const [items, setItems] = useState<FeedPrayer[]>([]);
   const [loading, setLoading] = useState(true);
 
   // composer state
@@ -44,7 +49,7 @@ export default function Feed() {
       setLoading(true);
       const { data, error } = await supabase
         .from('prayers')
-        .select('id, content, category, created_at')
+        .select('id, author_id, content, category, created_at')
         .order('created_at', { ascending: false })
         .limit(50);
 
@@ -53,7 +58,7 @@ export default function Feed() {
         console.error('Feed load error:', error);
         setItems([]);
       } else {
-        setItems((data ?? []) as PrayerRow[]);
+        setItems((data ?? []) as FeedPrayer[]);
       }
       setLoading(false);
     }
@@ -86,7 +91,7 @@ export default function Feed() {
         circle_id: null,
         is_featured: false,
       })
-      .select('id, content, category, created_at')
+      .select('id, author_id, content, category, created_at')
       .single();
     setPosting(false);
 
@@ -97,7 +102,7 @@ export default function Feed() {
     }
 
     if (data) {
-      setItems((prev) => [data as PrayerRow, ...prev]);
+      setItems((prev) => [data as FeedPrayer, ...prev]);
       setContent('');
       setCategory('national');
     }
@@ -187,11 +192,15 @@ export default function Feed() {
 
                 {/* Actions stacked so the replies composer can use full width */}
                 <div className="mt-2 flex flex-col gap-2">
-  <LikeControl prayerId={p.id} />
-  <SendToRepsButton prayerId={p.id} />
-  <SendToPresidentButton prayerId={p.id} />
-  <RepliesSection prayerId={p.id} />
-</div>
+                  <LikeControl prayerId={p.id} />
+                  {user?.id === p.author_id && (
+                    <>
+                      <SendToRepsButton prayerId={p.id} />
+                      <SendToPresidentButton prayerId={p.id} />
+                    </>
+                  )}
+                  <RepliesSection prayerId={p.id} />
+                </div>
               </div>
             ))
           )}
