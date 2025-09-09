@@ -19,7 +19,7 @@ export default function Navigation() {
     { href: '/groups', label: 'Groups', icon: Users },
     { href: '/circles', label: 'Circles', icon: Circle },
     { href: '/pricing', label: 'Pricing', icon: DollarSign },
-    { href: '/settings', label: 'Settings', icon: Settings },
+    { href: '/settings', label: 'Profile', icon: Settings },
   ];
 
   const handleSignOut = async () => {

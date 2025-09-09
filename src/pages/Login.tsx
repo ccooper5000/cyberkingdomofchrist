@@ -4,6 +4,12 @@ import { supabase, auth } from '@/lib/supabase'
 import { ensurePrimaryZip } from '@/lib/zip'
 import { Button } from '@/components/ui/button'
 import { useNavigate } from 'react-router-dom'
+import {
+  saveMyProfile,
+  setPendingProfileLocal,
+  applyPendingProfileFromLocalStorage,
+  isUsernameAvailable,
+} from '@/lib/profile'
 
 type Mode = 'signin' | 'signup'
 
@@ -15,24 +21,31 @@ export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
 
-  // signup-only
+  // signup-only (new profile fields)
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [username, setUsername] = useState('')
+  const [bio, setBio] = useState('')
   const [zip, setZip] = useState('')
+
+  // username availability (signup)
+  const [usernameStatus, setUsernameStatus] = useState<
+    'idle' | 'checking' | 'available' | 'taken' | 'error'
+  >('idle')
 
   // ui state
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
 
-  // On mount: if a ZIP was saved during email-confirm flow, try to apply it once the user is actually signed in.
+  // On mount: if a ZIP was saved during email-confirm flow, apply it once the user is actually signed in.
   useEffect(() => {
     let active = true
     ;(async () => {
       const storedZip = localStorage.getItem('ckoc_pending_zip')
       if (!storedZip) return
-
       const { data } = await supabase.auth.getUser()
       if (!active || !data.user) return
-
       const res = await ensurePrimaryZip(storedZip)
       if ((res as any)?.ok || (res as any)?.locked) {
         localStorage.removeItem('ckoc_pending_zip')
@@ -43,6 +56,45 @@ export default function Login() {
     }
   }, [])
 
+  // On mount: if a profile was saved during email-confirm flow, apply it once the user is signed in.
+  useEffect(() => {
+    let active = true
+    ;(async () => {
+      const { data } = await supabase.auth.getUser()
+      if (!active || !data.user) return
+      await applyPendingProfileFromLocalStorage()
+    })()
+    return () => {
+      active = false
+    }
+  }, [])
+
+  // Debounced username availability check (signup only)
+  useEffect(() => {
+    if (mode !== 'signup') return
+    const raw = username.trim().toLowerCase()
+    if (!raw) {
+      setUsernameStatus('idle')
+      return
+    }
+    let cancelled = false
+    setUsernameStatus('checking')
+    const handle = setTimeout(async () => {
+      try {
+        const available = await isUsernameAvailable(raw)
+        if (cancelled) return
+        setUsernameStatus(available ? 'available' : 'taken')
+      } catch {
+        if (cancelled) return
+        setUsernameStatus('error')
+      }
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(handle)
+    }
+  }, [username, mode])
+
   const doSignIn = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -51,8 +103,8 @@ export default function Login() {
     setBusy(true)
 
     try {
-      const pwd = password // snapshot
-      setPassword('')      // clear ASAP
+      const pwd = password
+      setPassword('') // clear ASAP
 
       const { error } = await auth.signIn(email, pwd)
       if (error) {
@@ -68,6 +120,9 @@ export default function Login() {
           localStorage.removeItem('ckoc_pending_zip')
         }
       }
+
+      // Apply any pending profile from pre-confirmation
+      await applyPendingProfileFromLocalStorage()
 
       navigate('/feed')
     } finally {
@@ -88,12 +143,23 @@ export default function Login() {
       return
     }
 
+    // Basic username sanity before network
+    const uname = (username || '').trim().toLowerCase()
+    if (!/^[a-z0-9_]{3,24}$/.test(uname)) {
+      setError('Username must be 3–24 characters: lowercase letters, numbers, or underscores.')
+      return
+    }
+    if (usernameStatus === 'taken' || usernameStatus === 'checking') {
+      setError('Please choose an available username.')
+      return
+    }
+
     setBusy(true)
     try {
-      const pwd = password // snapshot
-      setPassword('')      // clear ASAP
+      const pwd = password
+      setPassword('') // clear ASAP
 
-      // auth.signUp() sets emailRedirectTo to /auth/callback and does NOT sign in when confirmations are ON
+      // auth.signUp() sets emailRedirectTo and does NOT sign in when confirmations are ON
       const { data, error } = await auth.signUp(email, pwd)
       if (error) {
         setError(error.message || 'Sign up failed.')
@@ -101,20 +167,34 @@ export default function Login() {
       }
 
       const hasSession = !!data?.session
+      const profilePayload = {
+        first_name: firstName || null,
+        last_name: lastName || null,
+        username: uname || null,
+        bio: bio || null,
+      }
 
       if (hasSession) {
-        // (Confirmations OFF) — set ZIP immediately
+        // Confirmations OFF — set ZIP immediately, then save profile
         const res = await ensurePrimaryZip(zip)
         if (!(res as any)?.ok && !(res as any)?.locked) {
           setError((res as any)?.message || 'Could not store ZIP.')
           return
         }
+
+        const saveRes = await saveMyProfile(profilePayload)
+        if (!saveRes.ok) {
+          // If something is off (e.g., conflict), stash to apply later
+          setPendingProfileLocal(profilePayload)
+        }
+
         navigate('/feed')
         return
       }
 
-      // (Confirmations ON) — stash ZIP and prompt the user to confirm by email
+      // Confirmations ON — stash ZIP + profile for after email verification
       localStorage.setItem('ckoc_pending_zip', zip)
+      setPendingProfileLocal(profilePayload)
       setMsg('Please check your email to confirm your account. After confirming, sign in to continue.')
       setMode('signin')
     } finally {
@@ -177,30 +257,125 @@ export default function Login() {
         </div>
 
         {isSignup && (
-          <div className="space-y-2">
-            <label className="block text-sm font-medium" htmlFor="signup-zip">
-              ZIP (required, US only)
-            </label>
-            <input
-              id="signup-zip"
-              name="postal-code"
-              inputMode="numeric"
-              required
-              value={zip}
-              onChange={(e) => setZip(e.target.value.trim())}
-              className="w-full border rounded-md px-3 py-2"
-              placeholder="12345 or 12345-6789"
-              maxLength={10}
-              autoComplete="postal-code"
-            />
-            <p className="text-xs text-gray-500">
-              Your ZIP is used to match your representatives. It’s locked after creation.
-            </p>
-          </div>
+          <>
+            <div className="space-y-2">
+              <label className="block text-sm font-medium" htmlFor="signup-zip">
+                ZIP (required, US only)
+              </label>
+              <input
+                id="signup-zip"
+                name="postal-code"
+                inputMode="numeric"
+                required
+                value={zip}
+                onChange={(e) => setZip(e.target.value.trim())}
+                className="w-full border rounded-md px-3 py-2"
+                placeholder="12345 or 12345-6789"
+                maxLength={10}
+                autoComplete="postal-code"
+              />
+              <p className="text-xs text-gray-500">
+                Your ZIP is used to match your representatives. It’s locked after creation.
+              </p>
+            </div>
+
+            {/* Signup: Profile fields */}
+            <div className="mt-6 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="firstName" className="block text-sm font-medium">First name</label>
+                  <input
+                    id="firstName"
+                    name="firstName"
+                    type="text"
+                    autoComplete="given-name"
+                    maxLength={50}
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                    className="w-full border rounded-md px-3 py-2"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="lastName" className="block text-sm font-medium">Last name</label>
+                  <input
+                    id="lastName"
+                    name="lastName"
+                    type="text"
+                    autoComplete="family-name"
+                    maxLength={50}
+                    value={lastName}
+                    onChange={(e) => setLastName(e.target.value)}
+                    className="w-full border rounded-md px-3 py-2"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="username" className="block text-sm font-medium">Username</label>
+                <input
+                  id="username"
+                  name="username"
+                  type="text"
+                  inputMode="text"
+                  pattern="^[a-z0-9_]{3,24}$"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  onBlur={() => setUsername((u) => u.trim().toLowerCase())}
+                  minLength={3}
+                  maxLength={24}
+                  title="3–24 chars: lowercase letters, numbers, or underscores"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  required
+                  className="w-full border rounded-md px-3 py-2"
+                  placeholder="@username"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  3–24 chars: lowercase letters, numbers, or underscores.
+                </p>
+                {usernameStatus === 'checking' && (
+                  <p className="text-xs text-gray-500" aria-live="polite">Checking availability…</p>
+                )}
+                {usernameStatus === 'available' && (
+                  <p className="text-xs text-green-600" aria-live="polite">Username is available.</p>
+                )}
+                {usernameStatus === 'taken' && (
+                  <p className="text-xs text-red-600" aria-live="polite">That username is already taken.</p>
+                )}
+                {usernameStatus === 'error' && (
+                  <p className="text-xs text-red-600" aria-live="polite">Couldn’t check availability. Try again.</p>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="bio" className="block text-sm font-medium">Short bio (optional)</label>
+                <textarea
+                  id="bio"
+                  name="bio"
+                  rows={4}
+                  maxLength={2000}
+                  value={bio}
+                  onChange={(e) => setBio(e.target.value)}
+                  className="w-full border rounded-md px-3 py-2"
+                />
+                <div className="mt-1 text-xs text-gray-500">{bio.length}/2000</div>
+              </div>
+            </div>
+          </>
         )}
 
         <div className="flex items-center justify-between">
-          <Button type="submit" disabled={busy}>
+          <Button
+            type="submit"
+            disabled={
+              busy ||
+              (isSignup && (usernameStatus === 'checking' || usernameStatus === 'taken'))
+            }
+          >
             {busy ? 'Please wait…' : (mode === 'signin' ? 'Sign In' : 'Create Account')}
           </Button>
 
