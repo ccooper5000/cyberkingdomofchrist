@@ -8,8 +8,9 @@ import { Heart } from 'lucide-react';
 import SendToRepsButton from '@/components/SendToRepsButton';
 import SendToPresidentButton from '@/components/SendToPresidentButton';
 import type { Database } from '@/types/database';
+import UserAvatarChip from '@/components/UserAvatarChip';
+import AuthMessages from '@/components/AuthMessages';
 
-// Use the DB type and include author_id so we can gate send buttons
 type FeedPrayer = Pick<
   Database['public']['Tables']['prayers']['Row'],
   'id' | 'author_id' | 'content' | 'category' | 'created_at'
@@ -111,8 +112,14 @@ export default function Feed() {
   return (
     <div className="min-h-screen pt-24">
       <FlashBanner />
+      <AuthMessages />
 
       <div className="max-w-3xl mx-auto px-4 space-y-6">
+        {/* Who's logged in */}
+        <div className="flex justify-end">
+          <UserAvatarChip />
+        </div>
+
         {/* Inline composer */}
         <div className="border rounded-2xl p-4 bg-white shadow-sm">
           <div className="flex items-center justify-between mb-3">
@@ -220,7 +227,6 @@ function LikeControl({ prayerId }: { prayerId: string }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Load current user's like state
   useEffect(() => {
     let mounted = true;
     async function loadLiked() {
@@ -244,7 +250,6 @@ function LikeControl({ prayerId }: { prayerId: string }) {
     };
   }, [prayerId, user?.id]);
 
-  // Load like count via RPC (cast to any to bypass TS missing types)
   useEffect(() => {
     let mounted = true;
     async function loadCount() {
@@ -324,7 +329,6 @@ function LikeControl({ prayerId }: { prayerId: string }) {
 
 /**
  * RepliesSection: shows a toggle with a live count, loads replies, and has a small composer.
- * Each reply has its own Like control + count via comment_likes.
  */
 function RepliesSection({ prayerId }: { prayerId: string }) {
   const { user } = useAuth();
@@ -335,11 +339,8 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
 
   const [content, setContent] = useState('');
   const [posting, setPosting] = useState(false);
-
-  // reply count
   const [replyCount, setReplyCount] = useState<number>(0);
 
-  // Load the count once on mount (and if prayerId changes)
   useEffect(() => {
     let mounted = true;
     async function loadCount() {
@@ -468,7 +469,6 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
                   </div>
                   <p className="mt-1 text-sm whitespace-pre-wrap">{c.content}</p>
 
-                  {/* Comment Like control + count (cast to any on comment_likes) */}
                   <CommentLikeControl commentId={c.id} />
                 </div>
               ))}
@@ -490,7 +490,6 @@ function CommentLikeControl({ commentId }: { commentId: string }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Load current user's like state (cast to any for comment_likes)
   useEffect(() => {
     let mounted = true;
     async function loadLiked() {
@@ -514,7 +513,6 @@ function CommentLikeControl({ commentId }: { commentId: string }) {
     };
   }, [commentId, user?.id]);
 
-  // Load like count via RPC (cast to any)
   useEffect(() => {
     let mounted = true;
     async function loadCount() {
