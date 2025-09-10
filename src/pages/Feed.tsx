@@ -374,6 +374,7 @@ function AuthorByline({
 
   return (
     <div className="text-[11px] text-gray-600">
+      Posted by{' '}
       {isPublic ? (
         <Link to={`/u/${username}`} className="underline">{username}</Link>
       ) : (
