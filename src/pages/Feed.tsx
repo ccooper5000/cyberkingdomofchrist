@@ -9,6 +9,7 @@ import SendToRepsButton from '@/components/SendToRepsButton';
 import SendToPresidentButton from '@/components/SendToPresidentButton';
 import UserAvatarChip from '@/components/UserAvatarChip';
 import AuthMessages from '@/components/AuthMessages';
+import { fetchProfilesPublicByIds } from '@/lib/profileLookup';
 
 /** Keep types simple & runtime-safe */
 type FeedPrayer = {
@@ -38,6 +39,7 @@ type CommentRow = {
 export default function Feed() {
   const { user } = useAuth();
   const [items, setItems] = useState<FeedPrayer[]>([]);
+  const [profiles, setProfiles] = useState<Record<string, { username: string | null; is_public: boolean | null }>>({});
   const [loading, setLoading] = useState(true);
 
   // composer state
@@ -62,8 +64,15 @@ export default function Feed() {
           console.error('Feed load error:', error);
           setItems([]);
         } else {
-          setItems((data ?? []) as FeedPrayer[]);
-        }
+      setItems(data as any);
+        try {
+          const ids = (data as any[]).map((p) => p.author_id);
+          const map = await fetchProfilesPublicByIds(ids);
+          setProfiles((prev) => ({ ...prev, ...map }));
+      }  catch (e) {
+        console.warn('Profile prefetch skipped:', e);
+      }
+    }
       } catch (e) {
         if (mounted) setItems([]);
         console.error('Feed load exception:', e);
@@ -110,10 +119,18 @@ export default function Feed() {
       }
 
       if (data) {
-        setItems((prev) => [data as FeedPrayer, ...prev]);
-        setContent('');
-        setCategory('national');
-      }
+  setItems((prev) => [data as FeedPrayer, ...prev]);
+
+  try {
+    const map = await fetchProfilesPublicByIds([user.id]);
+    setProfiles((prev) => ({ ...prev, ...map }));
+  } catch {}
+
+  setContent('');
+  setCategory('national');
+}
+
+      
     } catch (e) {
       console.error('Post exception:', e);
       setPostError('Could not post your prayer.');

@@ -4,6 +4,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { ThemeProvider } from '@/components/theme-provider';
 import { Toaster } from '@/components/ui/toaster';
 import AuthCallback from '@/pages/AuthCallback'
+import PublicProfile from '@/pages/PublicProfile';
 
 // Pages
 import Feed from '@/pages/Feed';
@@ -35,8 +36,8 @@ function App() {
             <Route path="privacy" element={<Privacy />} />
             <Route path="terms" element={<Terms />} />
             <Route path="/post" element={<PostPrayer />} />
-            <Route path="/auth/callback" element={<AuthCallback />}
-            />
+            <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/u/:username" element={<PublicProfile />} />
           </Route>
         </Routes>
       </Router>
