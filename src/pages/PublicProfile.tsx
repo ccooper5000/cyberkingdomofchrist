@@ -23,6 +23,7 @@ type PublicPrayer = {
   content: string;
   category: string | null;
   created_at: string;
+  // visibility?: string | null; // optional if you want to inspect it
 };
 
 const PAGE_SIZE = 20;
@@ -100,13 +101,15 @@ export default function PublicProfile() {
     try {
       const { data, error } = await supabase
         .from('prayers')
-        .select('id, author_id, content, category, created_at')
+        .select('id, author_id, content, category, created_at') // , visibility
         .eq('author_id', profile.id)
-        .eq('visibility', 'public') // only public prayers
+        // include both public and legacy (NULL) rows
+        .or('visibility.eq.public,visibility.is.null')
         .order('created_at', { ascending: false })
         .range(nextOffset, nextOffset + PAGE_SIZE - 1);
 
       if (error) {
+        console.error('[PublicProfile] prayers load error:', error);
         if (firstPage) {
           setPrayers([]);
           setPrayersError(error.message || 'Could not load prayers.');
@@ -128,7 +131,8 @@ export default function PublicProfile() {
 
       setNextOffset((n) => n + rows.length);
       setHasMore(rows.length === PAGE_SIZE);
-    } catch {
+    } catch (e) {
+      console.error('[PublicProfile] prayers load exception:', e);
       if (firstPage) {
         setPrayers([]);
         setPrayersError('Could not load prayers.');
