@@ -240,6 +240,7 @@ export default function Feed() {
 
                 {/* Actions */}
                 <div className="mt-2 flex flex-col gap-2">
+                  <AuthorByline authorId={p.author_id} profiles={profiles} />
                   <LikeControl prayerId={p.id} />
                   {user?.id === p.author_id && (
                     <>
@@ -359,6 +360,29 @@ function LikeControl({ prayerId }: { prayerId: string }) {
     </div>
   );
 }
+/** AuthorByline */
+function AuthorByline({
+  authorId,
+  profiles,
+}: {
+  authorId: string;
+  profiles: Record<string, { username: string | null; is_public: boolean | null }>;
+}) {
+  const info = profiles[authorId];
+  const username = info?.username ?? 'Private user';
+  const isPublic = !!info?.is_public && !!info?.username;
+
+  return (
+    <div className="text-[11px] text-gray-600">
+      {isPublic ? (
+        <Link to={`/u/${username}`} className="underline">{username}</Link>
+      ) : (
+        <span title="profile is private">{username}</span>
+      )}
+    </div>
+  );
+}
+
 
 /** RepliesSection */
 function RepliesSection({ prayerId }: { prayerId: string }) {
