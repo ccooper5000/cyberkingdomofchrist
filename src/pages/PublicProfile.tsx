@@ -1,9 +1,8 @@
 // src/pages/PublicProfile.tsx
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 
 type ProfileView = {
   id: string;
@@ -23,32 +22,24 @@ type PublicPrayer = {
   content: string;
   category: string | null;
   created_at: string;
-  // visibility?: string | null;
 };
-
-const PAGE_SIZE = 20;
 
 export default function PublicProfile() {
   const { username } = useParams<{ username: string }>();
-
-  // Profile state
-  const [loadingProfile, setLoadingProfile] = useState(true);
+  const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<ProfileView | null>(null);
-  const [profileError, setProfileError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // Prayers state
   const [prayers, setPrayers] = useState<PublicPrayer[]>([]);
   const [prayersLoading, setPrayersLoading] = useState(false);
   const [prayersError, setPrayersError] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [cursor, setCursor] = useState<string | null>(null); // last item's created_at
 
   // Load profile basics
   useEffect(() => {
     let mounted = true;
     (async () => {
-      setLoadingProfile(true);
-      setProfileError(null);
+      setLoading(true);
+      setError(null);
       try {
         const { data, error } = await supabase
           .from('profiles')
@@ -61,23 +52,23 @@ export default function PublicProfile() {
         if (!mounted) return;
 
         if (error) {
-          setProfileError(error.message || 'Could not load profile.');
+          setError(error.message || 'Could not load profile.');
           setProfile(null);
         } else if (!data) {
-          setProfileError('Profile not found.');
+          setError('Profile not found.');
           setProfile(null);
         } else if (!data.is_public) {
-          setProfileError('This profile is private.');
+          setError('This profile is private.');
           setProfile(null);
         } else {
           setProfile(data as ProfileView);
         }
-      } catch (e) {
+      } catch {
         if (!mounted) return;
-        setProfileError('Could not load profile.');
+        setError('Could not load profile.');
         setProfile(null);
       } finally {
-        if (mounted) setLoadingProfile(false);
+        if (mounted) setLoading(false);
       }
     })();
     return () => {
@@ -85,73 +76,46 @@ export default function PublicProfile() {
     };
   }, [username]);
 
-  // Load first page or next page (keyset pagination by created_at)
-  const loadPage = useCallback(
-    async (mode: 'first' | 'next') => {
-      if (!profile?.id) return;
-      setPrayersLoading(true);
-      setPrayersError(null);
-
-      try {
-        let q = supabase
-          .from('prayers')
-          .select('id, author_id, content, category, created_at') // , visibility
-          .eq('author_id', profile.id)
-          // allow public and legacy (NULL) rows
-          .or('visibility.eq.public,visibility.is.null')
-          .order('created_at', { ascending: false });
-
-        if (mode === 'next' && cursor) {
-          q = q.lt('created_at', cursor);
-        }
-
-        q = q.limit(PAGE_SIZE);
-
-        const { data, error } = await q;
-        if (error) {
-          console.error('[PublicProfile] prayers error:', error);
-          setPrayersError(error.message || 'Could not load prayers.');
-          setHasMore(false);
-          return;
-        }
-
-        const rows = (data ?? []) as PublicPrayer[];
-
-        if (mode === 'first') {
-          setPrayers(rows);
-        } else {
-          setPrayers((prev) => [...prev, ...rows]);
-        }
-
-        // Update cursor to the last item (if any)
-        if (rows.length > 0) {
-          setCursor(rows[rows.length - 1].created_at);
-        }
-
-        setHasMore(rows.length === PAGE_SIZE);
-      } catch (e) {
-        console.error('[PublicProfile] prayers exception:', e);
-        setPrayersError('Could not load prayers.');
-        setHasMore(false);
-      } finally {
-        setPrayersLoading(false);
-      }
-    },
-    [profile?.id, cursor]
-  );
-
-  // Reset & load first page when profile changes
+  // Load this user's public prayers (only if profile is public)
   useEffect(() => {
     if (!profile?.id) return;
-    setPrayers([]);
-    setCursor(null);
-    setHasMore(false);
-    setPrayersError(null);
-    // Load the first page
-    loadPage('first');
-  }, [profile?.id, loadPage]);
 
-  if (loadingProfile) {
+    let mounted = true;
+    (async () => {
+      setPrayersLoading(true);
+      setPrayersError(null);
+      try {
+        const { data, error } = await supabase
+          .from('prayers')
+          .select('id, author_id, content, category, created_at')
+          .eq('author_id', profile.id)
+          .eq('visibility', 'public') // only show public prayers
+          .order('created_at', { ascending: false })
+          .limit(50);
+
+        if (!mounted) return;
+
+        if (error) {
+          setPrayers([]);
+          setPrayersError(error.message || 'Could not load prayers.');
+        } else {
+          setPrayers((data ?? []) as PublicPrayer[]);
+        }
+      } catch {
+        if (!mounted) return;
+        setPrayers([]);
+        setPrayersError('Could not load prayers.');
+      } finally {
+        if (mounted) setPrayersLoading(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [profile?.id]);
+
+  if (loading) {
     return (
       <div className="min-h-screen pt-24">
         <div className="max-w-3xl mx-auto px-4">Loading…</div>
@@ -159,12 +123,12 @@ export default function PublicProfile() {
     );
   }
 
-  if (profileError) {
+  if (error) {
     return (
       <div className="min-h-screen pt-24">
         <div className="max-w-3xl mx-auto px-4">
           <Card className="p-6">
-            <div className="text-sm text-gray-700">{profileError}</div>
+            <div className="text-sm text-gray-700">{error}</div>
             <div className="mt-4">
               <Link to="/" className="text-sm underline">
                 Back to feed
@@ -214,7 +178,7 @@ export default function PublicProfile() {
         <div>
           <h2 className="text-base font-semibold mb-2">Prayers</h2>
 
-          {prayersLoading && prayers.length === 0 && (
+          {prayersLoading && (
             <div className="text-sm text-gray-600">Loading prayers…</div>
           )}
 
@@ -239,20 +203,6 @@ export default function PublicProfile() {
               </Card>
             ))}
           </div>
-
-          {hasMore && (
-            <div className="pt-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => loadPage('next')}
-                disabled={prayersLoading}
-              >
-                {prayersLoading ? 'Loading…' : 'Load more'}
-              </Button>
-            </div>
-          )}
         </div>
 
         {/* Back link */}
