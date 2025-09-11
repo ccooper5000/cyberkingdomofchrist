@@ -1,6 +1,6 @@
 // src/pages/Group.tsx
-import React, { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useEffect, useState, useCallback } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -24,13 +24,23 @@ type GroupPrayer = {
 
 export default function GroupPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
 
+  // Auth / membership
+  const [userId, setUserId] = useState<string | null>(null);
+  const [isMember, setIsMember] = useState<boolean>(false);
+  const [membershipLoading, setMembershipLoading] = useState<boolean>(false);
+  const [membershipError, setMembershipError] = useState<string | null>(null);
+
+  // Group header
   const [group, setGroup] = useState<GroupRow | null>(null);
   const [groupLoading, setGroupLoading] = useState(true);
   const [groupError, setGroupError] = useState<string | null>(null);
 
+  // Member count
   const [memberCount, setMemberCount] = useState<number>(0);
 
+  // Prayers
   const [prayers, setPrayers] = useState<GroupPrayer[]>([]);
   const [prayersLoading, setPrayersLoading] = useState(false);
   const [prayersError, setPrayersError] = useState<string | null>(null);
@@ -38,6 +48,14 @@ export default function GroupPage() {
   const [profiles, setProfiles] = useState<
     Record<string, { username: string | null; is_public: boolean | null }>
   >({});
+
+  // Load current user id
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      setUserId(data.user?.id ?? null);
+    })();
+  }, []);
 
   // Load group header
   useEffect(() => {
@@ -81,7 +99,6 @@ export default function GroupPage() {
     if (!id) return;
     let mounted = true;
     (async () => {
-      // Use count-only query (exact) for efficiency
       const { count, error } = await supabase
         .from('group_members')
         .select('group_id', { count: 'exact', head: true })
@@ -99,6 +116,36 @@ export default function GroupPage() {
       mounted = false;
     };
   }, [id]);
+
+  // Load membership status for current user
+  const loadMembership = useCallback(async () => {
+    if (!id || !userId) {
+      setIsMember(false);
+      return;
+    }
+    try {
+      const { data, error } = await supabase
+        .from('group_members')
+        .select('group_id')
+        .eq('group_id', id)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('[Group] membership load error:', error);
+        setIsMember(false);
+      } else {
+        setIsMember(!!data);
+      }
+    } catch (e) {
+      console.warn('[Group] membership load exception:', e);
+      setIsMember(false);
+    }
+  }, [id, userId]);
+
+  useEffect(() => {
+    loadMembership();
+  }, [loadMembership]);
 
   // Load group prayers (read-only)
   useEffect(() => {
@@ -166,6 +213,71 @@ export default function GroupPage() {
     );
   }
 
+  // Join
+  const handleJoin = async () => {
+    setMembershipError(null);
+    if (!userId) {
+      navigate('/login');
+      return;
+    }
+    if (!id) return;
+
+    setMembershipLoading(true);
+    try {
+      // Avoid dup: if already a member, just set state
+      const { data: exists } = await supabase
+        .from('group_members')
+        .select('group_id')
+        .eq('group_id', id)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (exists) {
+        setIsMember(true);
+        return;
+      }
+
+      const { error } = await supabase
+        .from('group_members')
+        .insert({ group_id: id, user_id: userId, role: 'member' });
+
+      if (error) throw error;
+
+      setIsMember(true);
+      setMemberCount((n) => n + 1);
+    } catch (e: any) {
+      console.error('[Group] join error:', e);
+      setMembershipError(e?.message || 'Could not join group.');
+    } finally {
+      setMembershipLoading(false);
+    }
+  };
+
+  // Leave
+  const handleLeave = async () => {
+    setMembershipError(null);
+    if (!userId || !id) return;
+
+    setMembershipLoading(true);
+    try {
+      const { error } = await supabase
+        .from('group_members')
+        .delete()
+        .eq('group_id', id)
+        .eq('user_id', userId);
+
+      if (error) throw error;
+
+      setIsMember(false);
+      setMemberCount((n) => Math.max(0, n - 1));
+    } catch (e: any) {
+      console.error('[Group] leave error:', e);
+      setMembershipError(e?.message || 'Could not leave group.');
+    } finally {
+      setMembershipLoading(false);
+    }
+  };
+
   if (groupLoading) {
     return (
       <div className="min-h-screen pt-24">
@@ -181,9 +293,7 @@ export default function GroupPage() {
           <Card className="p-6">
             <div className="text-sm text-gray-700">{groupError}</div>
             <div className="mt-4">
-              <Link to="/groups" className="text-sm underline">
-                Back to groups
-              </Link>
+              <Link to="/groups" className="text-sm underline">Back to groups</Link>
             </div>
           </Card>
         </div>
@@ -204,11 +314,34 @@ export default function GroupPage() {
               <p className="text-sm text-gray-600 mt-1">{group.description}</p>
             )}
             <div className="text-xs text-gray-500 mt-1">{memberCount} members</div>
+            {membershipError && (
+              <div className="text-xs text-red-600 mt-1">{membershipError}</div>
+            )}
           </div>
-          {/* Join/Leave comes next step; placeholder only */}
-          <Button variant="outline" size="sm" disabled title="Join/Leave coming soon">
-            Join
-          </Button>
+
+          <div className="flex gap-2">
+            {!isMember ? (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={handleJoin}
+                disabled={membershipLoading}
+                title={!userId ? 'Log in to join' : 'Join this group'}
+              >
+                {membershipLoading ? 'Joining…' : 'Join'}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleLeave}
+                disabled={membershipLoading}
+                title="Leave this group"
+              >
+                {membershipLoading ? 'Leaving…' : 'Leave'}
+              </Button>
+            )}
+          </div>
         </div>
 
         {/* Prayers */}
@@ -245,9 +378,7 @@ export default function GroupPage() {
         </div>
 
         <div>
-          <Link to="/groups" className="text-sm underline">
-            ← Back to groups
-          </Link>
+          <Link to="/groups" className="text-sm underline">← Back to groups</Link>
         </div>
       </div>
     </div>
