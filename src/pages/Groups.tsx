@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/lib/supabase';
 
+
 type GroupRow = {
   id: string;
   name: string;
@@ -82,7 +83,10 @@ export default function GroupsPage() {
             <h1 className="text-2xl font-bold">Groups</h1>
             <p className="text-sm text-gray-600">Find groups and see their member counts.</p>
           </div>
-          <Button variant="outline" size="sm" disabled title="Coming soon">Create Group</Button>
+          <Link to="/groups/new">
+            <Button variant="outline" size="sm">Create Group</Button>
+          </Link>
+
         </div>
 
         {loading && <div className="text-sm text-gray-600">Loading…</div>}

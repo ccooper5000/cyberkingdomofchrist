@@ -6,6 +6,7 @@ import { Toaster } from '@/components/ui/toaster';
 import AuthCallback from '@/pages/AuthCallback'
 import PublicProfile from '@/pages/PublicProfile';
 import Group from '@/pages/Group';
+import CreateGroup from '@/pages/CreateGroup';
 
 // Pages
 import Feed from '@/pages/Feed';
@@ -40,6 +41,8 @@ function App() {
             <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/u/:username" element={<PublicProfile />} />
             <Route path="/g/:id" element={<Group />} />
+            <Route path="/groups/new" element={<CreateGroup />} />
+
           </Route>
         </Routes>
       </Router>
