@@ -24,6 +24,13 @@ type PublicPrayer = {
   created_at: string;
 };
 
+type JoinedGroup = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
+
 export default function PublicProfile() {
   const { username } = useParams<{ username: string }>();
   const [loading, setLoading] = useState(true);
@@ -33,6 +40,12 @@ export default function PublicProfile() {
   const [prayers, setPrayers] = useState<PublicPrayer[]>([]);
   const [prayersLoading, setPrayersLoading] = useState(false);
   const [prayersError, setPrayersError] = useState<string | null>(null);
+
+  // Groups state
+  const [joinedGroups, setJoinedGroups] = useState<JoinedGroup[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+
 
   // Load profile basics
   useEffect(() => {
@@ -75,6 +88,51 @@ export default function PublicProfile() {
       mounted = false;
     };
   }, [username]);
+
+  // Load groups this user has joined
+useEffect(() => {
+  if (!profile?.id) return;
+
+  let mounted = true;
+  (async () => {
+    setGroupsLoading(true);
+    setGroupsError(null);
+    try {
+      // 1) memberships → group ids
+      const { data: mData, error: mErr } = await supabase
+        .from('group_members')
+        .select('group_id')
+        .eq('user_id', profile.id);
+
+      if (mErr) throw mErr;
+
+      const ids = Array.from(
+        new Set(((mData ?? []) as { group_id: string }[]).map(r => r.group_id))
+      );
+      if (ids.length === 0) {
+        if (mounted) setJoinedGroups([]);
+        return;
+      }
+
+      // 2) groups by id
+      const { data: gData, error: gErr } = await supabase
+        .from('groups')
+        .select('id, name, description')
+        .in('id', ids)
+        .order('name', { ascending: true });
+
+      if (gErr) throw gErr;
+      if (mounted) setJoinedGroups((gData ?? []) as JoinedGroup[]);
+    } catch (e: any) {
+      if (mounted) setGroupsError(e?.message || 'Could not load groups.');
+    } finally {
+      if (mounted) setGroupsLoading(false);
+    }
+  })();
+
+  return () => { mounted = false; };
+}, [profile?.id]);
+
 
   // Load this user's public prayers (only if profile is public)
   useEffect(() => {
@@ -173,6 +231,32 @@ export default function PublicProfile() {
             <div className="whitespace-pre-wrap text-sm">{profile.bio}</div>
           </Card>
         )}
+
+        {/* Groups */}
+<div>
+  <h2 className="text-base font-semibold mb-2">Groups</h2>
+
+  {groupsLoading && <div className="text-sm text-gray-600">Loading groups…</div>}
+  {groupsError && <div className="text-sm text-red-600">{groupsError}</div>}
+
+  {!groupsLoading && !groupsError && joinedGroups.length === 0 && (
+    <div className="text-sm text-gray-600">Not a member of any groups yet.</div>
+  )}
+
+  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+    {joinedGroups.map((g) => (
+      <Card key={g.id} className="p-4">
+        <Link to={`/g/${g.id}`} className="underline text-sm font-medium">
+          {g.name}
+        </Link>
+        {g.description && (
+          <div className="text-xs text-gray-600 mt-1">{g.description}</div>
+        )}
+      </Card>
+    ))}
+  </div>
+</div>
+
 
         {/* Prayers */}
         <div>
