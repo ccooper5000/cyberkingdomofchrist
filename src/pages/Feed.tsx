@@ -240,7 +240,8 @@ export default function Feed() {
 
                 {/* Actions */}
                 <div className="mt-2 flex flex-col gap-2">
-                  <AuthorByline authorId={p.author_id} profiles={profiles} />
+                  <AuthorByline authorId={p.author_id} profiles={profiles} createdAt={p.created_at} />
+
                   <LikeControl prayerId={p.id} />
                   {user?.id === p.author_id && (
                     <>
@@ -360,28 +361,49 @@ function LikeControl({ prayerId }: { prayerId: string }) {
     </div>
   );
 }
+
+function formatDateShort(dateStr: string) {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(new Date(dateStr));
+  } catch {
+    return (dateStr ?? '').slice(0, 10);
+  }
+}
+
+
 /** AuthorByline */
 function AuthorByline({
   authorId,
   profiles,
+  createdAt,
 }: {
   authorId: string;
   profiles: Record<string, { username: string | null; is_public: boolean | null }>;
+  createdAt: string;
 }) {
   const info = profiles[authorId];
   const username = info?.username ?? 'Private user';
   const isPublic = !!info?.is_public && !!info?.username;
+  const dateText = formatDateShort(createdAt);
 
   return (
-    <div className="text-[11px] text-gray-600">
-      Posted by{' '}
-      {isPublic ? (
-        <Link to={`/u/${username}`} className="underline">{username}</Link>
-      ) : (
-        <span title="profile is private">{username}</span>
-      )}
-    </div>
-  );
+  <div className="text-[11px] text-gray-600">
+    Posted by{' '}
+    {isPublic ? (
+      <Link to={`/u/${username}`} className="underline">
+        {username}
+      </Link>
+    ) : (
+      <span title="profile is private">{username}</span>
+    )}
+    {' · '}
+    <span>{dateText}</span>
+  </div>
+);
 }
 
 
@@ -522,9 +544,6 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
             <div className="space-y-2">
               {items.map((c) => (
                 <div key={c.id} className="bg-gray-50 border rounded-lg p-2">
-                  <div className="text-[11px] text-gray-500">
-                    {new Date(c.created_at).toLocaleString()}
-                  </div>
                   <p className="mt-1 text-sm whitespace-pre-wrap">{c.content}</p>
                   <CommentLikeControl commentId={c.id} />
                 </div>
