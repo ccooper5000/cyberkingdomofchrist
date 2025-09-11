@@ -23,7 +23,7 @@ type PublicPrayer = {
   content: string;
   category: string | null;
   created_at: string;
-  // visibility?: string | null; // optional if you want to inspect it
+  // visibility?: string | null;
 };
 
 const PAGE_SIZE = 20;
@@ -32,24 +32,23 @@ export default function PublicProfile() {
   const { username } = useParams<{ username: string }>();
 
   // Profile state
-  const [loading, setLoading] = useState(true);
+  const [loadingProfile, setLoadingProfile] = useState(true);
   const [profile, setProfile] = useState<ProfileView | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   // Prayers state
   const [prayers, setPrayers] = useState<PublicPrayer[]>([]);
+  const [prayersLoading, setPrayersLoading] = useState(false);
   const [prayersError, setPrayersError] = useState<string | null>(null);
-  const [initialPrayersLoading, setInitialPrayersLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [nextOffset, setNextOffset] = useState(0);
+  const [cursor, setCursor] = useState<string | null>(null); // last item's created_at
 
   // Load profile basics
   useEffect(() => {
     let mounted = true;
     (async () => {
-      setLoading(true);
-      setError(null);
+      setLoadingProfile(true);
+      setProfileError(null);
       try {
         const { data, error } = await supabase
           .from('profiles')
@@ -62,23 +61,23 @@ export default function PublicProfile() {
         if (!mounted) return;
 
         if (error) {
-          setError(error.message || 'Could not load profile.');
+          setProfileError(error.message || 'Could not load profile.');
           setProfile(null);
         } else if (!data) {
-          setError('Profile not found.');
+          setProfileError('Profile not found.');
           setProfile(null);
         } else if (!data.is_public) {
-          setError('This profile is private.');
+          setProfileError('This profile is private.');
           setProfile(null);
         } else {
           setProfile(data as ProfileView);
         }
-      } catch {
+      } catch (e) {
         if (!mounted) return;
-        setError('Could not load profile.');
+        setProfileError('Could not load profile.');
         setProfile(null);
       } finally {
-        if (mounted) setLoading(false);
+        if (mounted) setLoadingProfile(false);
       }
     })();
     return () => {
@@ -86,78 +85,73 @@ export default function PublicProfile() {
     };
   }, [username]);
 
-  const loadMore = useCallback(async () => {
-    if (!profile?.id) return;
-
-    const firstPage = nextOffset === 0;
-    if (firstPage) {
-      setInitialPrayersLoading(true);
-      setPrayers([]);
+  // Load first page or next page (keyset pagination by created_at)
+  const loadPage = useCallback(
+    async (mode: 'first' | 'next') => {
+      if (!profile?.id) return;
+      setPrayersLoading(true);
       setPrayersError(null);
-    } else {
-      setLoadingMore(true);
-    }
 
-    try {
-      const { data, error } = await supabase
-        .from('prayers')
-        .select('id, author_id, content, category, created_at') // , visibility
-        .eq('author_id', profile.id)
-        // include both public and legacy (NULL) rows
-        .or('visibility.eq.public,visibility.is.null')
-        .order('created_at', { ascending: false })
-        .range(nextOffset, nextOffset + PAGE_SIZE - 1);
+      try {
+        let q = supabase
+          .from('prayers')
+          .select('id, author_id, content, category, created_at') // , visibility
+          .eq('author_id', profile.id)
+          // allow public and legacy (NULL) rows
+          .or('visibility.eq.public,visibility.is.null')
+          .order('created_at', { ascending: false });
 
-      if (error) {
-        console.error('[PublicProfile] prayers load error:', error);
-        if (firstPage) {
-          setPrayers([]);
+        if (mode === 'next' && cursor) {
+          q = q.lt('created_at', cursor);
+        }
+
+        q = q.limit(PAGE_SIZE);
+
+        const { data, error } = await q;
+        if (error) {
+          console.error('[PublicProfile] prayers error:', error);
           setPrayersError(error.message || 'Could not load prayers.');
+          setHasMore(false);
+          return;
         }
-        setHasMore(false);
-        return;
-      }
 
-      const rows = (data ?? []) as PublicPrayer[];
+        const rows = (data ?? []) as PublicPrayer[];
 
-      setPrayers((prev) => {
-        const seen = new Set(prev.map((p) => p.id));
-        const merged = [...prev];
-        for (const r of rows) {
-          if (!seen.has(r.id)) merged.push(r);
+        if (mode === 'first') {
+          setPrayers(rows);
+        } else {
+          setPrayers((prev) => [...prev, ...rows]);
         }
-        return merged;
-      });
 
-      setNextOffset((n) => n + rows.length);
-      setHasMore(rows.length === PAGE_SIZE);
-    } catch (e) {
-      console.error('[PublicProfile] prayers load exception:', e);
-      if (firstPage) {
-        setPrayers([]);
+        // Update cursor to the last item (if any)
+        if (rows.length > 0) {
+          setCursor(rows[rows.length - 1].created_at);
+        }
+
+        setHasMore(rows.length === PAGE_SIZE);
+      } catch (e) {
+        console.error('[PublicProfile] prayers exception:', e);
         setPrayersError('Could not load prayers.');
+        setHasMore(false);
+      } finally {
+        setPrayersLoading(false);
       }
-      setHasMore(false);
-    } finally {
-      if (firstPage) {
-        setInitialPrayersLoading(false);
-      } else {
-        setLoadingMore(false);
-      }
-    }
-  }, [profile?.id, nextOffset]);
+    },
+    [profile?.id, cursor]
+  );
 
-  // Reset prayers and load first page whenever profile changes
+  // Reset & load first page when profile changes
   useEffect(() => {
     if (!profile?.id) return;
     setPrayers([]);
-    setNextOffset(0);
+    setCursor(null);
     setHasMore(false);
     setPrayersError(null);
-    loadMore();
-  }, [profile?.id, loadMore]);
+    // Load the first page
+    loadPage('first');
+  }, [profile?.id, loadPage]);
 
-  if (loading) {
+  if (loadingProfile) {
     return (
       <div className="min-h-screen pt-24">
         <div className="max-w-3xl mx-auto px-4">Loading…</div>
@@ -165,12 +159,12 @@ export default function PublicProfile() {
     );
   }
 
-  if (error) {
+  if (profileError) {
     return (
       <div className="min-h-screen pt-24">
         <div className="max-w-3xl mx-auto px-4">
           <Card className="p-6">
-            <div className="text-sm text-gray-700">{error}</div>
+            <div className="text-sm text-gray-700">{profileError}</div>
             <div className="mt-4">
               <Link to="/" className="text-sm underline">
                 Back to feed
@@ -220,7 +214,7 @@ export default function PublicProfile() {
         <div>
           <h2 className="text-base font-semibold mb-2">Prayers</h2>
 
-          {initialPrayersLoading && (
+          {prayersLoading && prayers.length === 0 && (
             <div className="text-sm text-gray-600">Loading prayers…</div>
           )}
 
@@ -228,7 +222,7 @@ export default function PublicProfile() {
             <div className="text-sm text-red-600">{prayersError}</div>
           )}
 
-          {!initialPrayersLoading && !prayersError && prayers.length === 0 && (
+          {!prayersLoading && !prayersError && prayers.length === 0 && (
             <div className="text-sm text-gray-600">No public prayers yet.</div>
           )}
 
@@ -246,16 +240,16 @@ export default function PublicProfile() {
             ))}
           </div>
 
-          {hasMore && !initialPrayersLoading && (
+          {hasMore && (
             <div className="pt-3">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={loadMore}
-                disabled={loadingMore}
+                onClick={() => loadPage('next')}
+                disabled={prayersLoading}
               >
-                {loadingMore ? 'Loading…' : 'Load more'}
+                {prayersLoading ? 'Loading…' : 'Load more'}
               </Button>
             </div>
           )}
