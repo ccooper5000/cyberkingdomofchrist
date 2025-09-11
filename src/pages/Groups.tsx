@@ -1,5 +1,6 @@
 // src/pages/Groups.tsx
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Users } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -27,7 +28,7 @@ export default function GroupsPage() {
       setLoading(true);
       setError(null);
       try {
-        // 1) Load all groups (MVP: no privacy distinction in schema yet)
+        // 1) Load groups
         const { data: gData, error: gErr } = await supabase
           .from('groups')
           .select('id, name, description, created_by, created_at')
@@ -39,12 +40,12 @@ export default function GroupsPage() {
         const rows = (gData ?? []) as GroupRow[];
         setGroups(rows);
 
-        // 2) Load member counts in one batched call (client-side aggregate)
+        // 2) Member counts
         if (rows.length > 0) {
           const ids = rows.map((g) => g.id);
           const { data: mData, error: mErr } = await supabase
             .from('group_members')
-            .select('group_id') // minimal, we only need group_id to count
+            .select('group_id')
             .in('group_id', ids);
 
           if (mErr) throw mErr;
@@ -54,7 +55,6 @@ export default function GroupsPage() {
           for (const { group_id } of (mData ?? []) as { group_id: string }[]) {
             counts[group_id] = (counts[group_id] || 0) + 1;
           }
-          // ensure every group has a number
           for (const id of ids) if (counts[id] == null) counts[id] = 0;
           setMemberCounts(counts);
         } else {
@@ -82,7 +82,6 @@ export default function GroupsPage() {
             <h1 className="text-2xl font-bold">Groups</h1>
             <p className="text-sm text-gray-600">Find groups and see their member counts.</p>
           </div>
-          {/* Future: create group (owner) */}
           <Button variant="outline" size="sm" disabled title="Coming soon">Create Group</Button>
         </div>
 
@@ -97,7 +96,11 @@ export default function GroupsPage() {
             <Card key={group.id} className="hover:shadow-md transition-shadow">
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle className="text-lg">{group.name}</CardTitle>
+                  <CardTitle className="text-lg">
+                    <Link to={`/g/${group.id}`} className="underline decoration-dotted hover:decoration-solid">
+                      {group.name}
+                    </Link>
+                  </CardTitle>
                   <Badge variant="secondary">Group</Badge>
                 </div>
                 {group.description && (
@@ -110,10 +113,11 @@ export default function GroupsPage() {
                     <Users className="h-4 w-4 mr-1" />
                     {memberCounts[group.id] ?? 0} members
                   </div>
-                  {/* Future: Join/Leave; for now read-only */}
-                  <Button variant="outline" size="sm" disabled title="Join coming soon">
-                    Join
-                  </Button>
+
+                  {/* View link (use Button styling if your Button supports asChild; otherwise keep plain link) */}
+                  <Link to={`/g/${group.id}`} className="text-sm underline">
+                    View
+                  </Link>
                 </div>
               </CardContent>
             </Card>
