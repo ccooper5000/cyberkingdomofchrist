@@ -1,9 +1,8 @@
 // src/pages/PublicProfile.tsx
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 
 type ProfileView = {
   id: string;
@@ -23,26 +22,17 @@ type PublicPrayer = {
   content: string;
   category: string | null;
   created_at: string;
-  // visibility?: string | null; // optional if you want to inspect it
 };
-
-const PAGE_SIZE = 20;
 
 export default function PublicProfile() {
   const { username } = useParams<{ username: string }>();
-
-  // Profile state
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<ProfileView | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Prayers state
   const [prayers, setPrayers] = useState<PublicPrayer[]>([]);
+  const [prayersLoading, setPrayersLoading] = useState(false);
   const [prayersError, setPrayersError] = useState<string | null>(null);
-  const [initialPrayersLoading, setInitialPrayersLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(false);
-  const [nextOffset, setNextOffset] = useState(0);
 
   // Load profile basics
   useEffect(() => {
@@ -86,76 +76,44 @@ export default function PublicProfile() {
     };
   }, [username]);
 
-  const loadMore = useCallback(async () => {
-    if (!profile?.id) return;
-
-    const firstPage = nextOffset === 0;
-    if (firstPage) {
-      setInitialPrayersLoading(true);
-      setPrayers([]);
-      setPrayersError(null);
-    } else {
-      setLoadingMore(true);
-    }
-
-    try {
-      const { data, error } = await supabase
-        .from('prayers')
-        .select('id, author_id, content, category, created_at') // , visibility
-        .eq('author_id', profile.id)
-        // include both public and legacy (NULL) rows
-        .or('visibility.eq.public,visibility.is.null')
-        .order('created_at', { ascending: false })
-        .range(nextOffset, nextOffset + PAGE_SIZE - 1);
-
-      if (error) {
-        console.error('[PublicProfile] prayers load error:', error);
-        if (firstPage) {
-          setPrayers([]);
-          setPrayersError(error.message || 'Could not load prayers.');
-        }
-        setHasMore(false);
-        return;
-      }
-
-      const rows = (data ?? []) as PublicPrayer[];
-
-      setPrayers((prev) => {
-        const seen = new Set(prev.map((p) => p.id));
-        const merged = [...prev];
-        for (const r of rows) {
-          if (!seen.has(r.id)) merged.push(r);
-        }
-        return merged;
-      });
-
-      setNextOffset((n) => n + rows.length);
-      setHasMore(rows.length === PAGE_SIZE);
-    } catch (e) {
-      console.error('[PublicProfile] prayers load exception:', e);
-      if (firstPage) {
-        setPrayers([]);
-        setPrayersError('Could not load prayers.');
-      }
-      setHasMore(false);
-    } finally {
-      if (firstPage) {
-        setInitialPrayersLoading(false);
-      } else {
-        setLoadingMore(false);
-      }
-    }
-  }, [profile?.id, nextOffset]);
-
-  // Reset prayers and load first page whenever profile changes
+  // Load this user's public prayers (only if profile is public)
   useEffect(() => {
     if (!profile?.id) return;
-    setPrayers([]);
-    setNextOffset(0);
-    setHasMore(false);
-    setPrayersError(null);
-    loadMore();
-  }, [profile?.id, loadMore]);
+
+    let mounted = true;
+    (async () => {
+      setPrayersLoading(true);
+      setPrayersError(null);
+      try {
+        const { data, error } = await supabase
+          .from('prayers')
+          .select('id, author_id, content, category, created_at')
+          .eq('author_id', profile.id)
+          .eq('visibility', 'public') // only show public prayers
+          .order('created_at', { ascending: false })
+          .limit(50);
+
+        if (!mounted) return;
+
+        if (error) {
+          setPrayers([]);
+          setPrayersError(error.message || 'Could not load prayers.');
+        } else {
+          setPrayers((data ?? []) as PublicPrayer[]);
+        }
+      } catch {
+        if (!mounted) return;
+        setPrayers([]);
+        setPrayersError('Could not load prayers.');
+      } finally {
+        if (mounted) setPrayersLoading(false);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [profile?.id]);
 
   if (loading) {
     return (
@@ -220,7 +178,7 @@ export default function PublicProfile() {
         <div>
           <h2 className="text-base font-semibold mb-2">Prayers</h2>
 
-          {initialPrayersLoading && (
+          {prayersLoading && (
             <div className="text-sm text-gray-600">Loading prayers…</div>
           )}
 
@@ -228,7 +186,7 @@ export default function PublicProfile() {
             <div className="text-sm text-red-600">{prayersError}</div>
           )}
 
-          {!initialPrayersLoading && !prayersError && prayers.length === 0 && (
+          {!prayersLoading && !prayersError && prayers.length === 0 && (
             <div className="text-sm text-gray-600">No public prayers yet.</div>
           )}
 
@@ -245,20 +203,6 @@ export default function PublicProfile() {
               </Card>
             ))}
           </div>
-
-          {hasMore && !initialPrayersLoading && (
-            <div className="pt-3">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={loadMore}
-                disabled={loadingMore}
-              >
-                {loadingMore ? 'Loading…' : 'Load more'}
-              </Button>
-            </div>
-          )}
         </div>
 
         {/* Back link */}
