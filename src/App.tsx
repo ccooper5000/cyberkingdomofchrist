@@ -5,6 +5,7 @@ import { ThemeProvider } from '@/components/theme-provider';
 import { Toaster } from '@/components/ui/toaster';
 import AuthCallback from '@/pages/AuthCallback'
 import PublicProfile from '@/pages/PublicProfile';
+import Group from '@/pages/Group';
 
 // Pages
 import Feed from '@/pages/Feed';
@@ -38,6 +39,7 @@ function App() {
             <Route path="/post" element={<PostPrayer />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/u/:username" element={<PublicProfile />} />
+            <Route path="/g/:id" element={<Group />} />
           </Route>
         </Routes>
       </Router>
