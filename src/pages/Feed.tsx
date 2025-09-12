@@ -64,15 +64,15 @@ export default function Feed() {
           console.error('Feed load error:', error);
           setItems([]);
         } else {
-      setItems(data as any);
-        try {
-          const ids = (data as any[]).map((p) => p.author_id);
-          const map = await fetchProfilesPublicByIds(ids);
-          setProfiles((prev) => ({ ...prev, ...map }));
-      }  catch (e) {
-        console.warn('Profile prefetch skipped:', e);
-      }
-    }
+          setItems(data as any);
+          try {
+            const ids = (data as any[]).map((p) => p.author_id);
+            const map = await fetchProfilesPublicByIds(ids);
+            setProfiles((prev) => ({ ...prev, ...map }));
+          } catch (e) {
+            console.warn('Profile prefetch skipped:', e);
+          }
+        }
       } catch (e) {
         if (mounted) setItems([]);
         console.error('Feed load exception:', e);
@@ -119,18 +119,16 @@ export default function Feed() {
       }
 
       if (data) {
-  setItems((prev) => [data as FeedPrayer, ...prev]);
+        setItems((prev) => [data as FeedPrayer, ...prev]);
 
-  try {
-    const map = await fetchProfilesPublicByIds([user.id]);
-    setProfiles((prev) => ({ ...prev, ...map }));
-  } catch {}
+        try {
+          const map = await fetchProfilesPublicByIds([user.id]);
+          setProfiles((prev) => ({ ...prev, ...map }));
+        } catch {}
 
-  setContent('');
-  setCategory('national');
-}
-
-      
+        setContent('');
+        setCategory('national');
+      }
     } catch (e) {
       console.error('Post exception:', e);
       setPostError('Could not post your prayer.');
@@ -147,17 +145,17 @@ export default function Feed() {
       <div className="max-w-3xl mx-auto px-4 space-y-6">
         {/* Auth controls always visible based on user presence */}
         <div className="flex justify-end items-center gap-3">
-  <UserAvatarChip /> {/* renders nothing if signed out */}
-  {!user ? (
-    <Link to="/login" className="text-sm underline">Log in</Link>
-  ) : (
-    <button
-      type="button"
-      onClick={() => supabase.auth.signOut()}
-      className="text-sm underline"
-    >
-      Log out
-    </button>
+          <UserAvatarChip /> {/* renders nothing if signed out */}
+          {!user ? (
+            <Link to="/login" className="text-sm underline">Log in</Link>
+          ) : (
+            <button
+              type="button"
+              onClick={() => supabase.auth.signOut()}
+              className="text-sm underline"
+            >
+              Log out
+            </button>
           )}
         </div>
 
@@ -230,9 +228,7 @@ export default function Feed() {
           ) : (
             items.map((p) => (
               <div key={p.id} className="border rounded-xl p-4 bg-white shadow-sm">
-                <div className="text-xs text-gray-500">
-                  {new Date(p.created_at).toLocaleString()}
-                </div>
+                {/* top timestamp removed to avoid duplication; date now shown in byline */}
                 <div className="mt-1 text-[11px] uppercase tracking-wide text-gray-600">
                   {String(p.category ?? 'uncategorized').replace('_', ' ')}
                 </div>
@@ -374,7 +370,6 @@ function formatDateShort(dateStr: string) {
   }
 }
 
-
 /** AuthorByline */
 function AuthorByline({
   authorId,
@@ -391,21 +386,20 @@ function AuthorByline({
   const dateText = formatDateShort(createdAt);
 
   return (
-  <div className="text-[11px] text-gray-600">
-    Posted by{' '}
-    {isPublic ? (
-      <Link to={`/u/${username}`} className="underline">
-        {username}
-      </Link>
-    ) : (
-      <span title="profile is private">{username}</span>
-    )}
-    {' · '}
-    <span>{dateText}</span>
-  </div>
-);
+    <div className="text-[11px] text-gray-600">
+      Posted by{' '}
+      {isPublic ? (
+        <Link to={`/u/${username}`} className="underline">
+          {username}
+        </Link>
+      ) : (
+        <span title="profile is private">{username}</span>
+      )}
+      {' · '}
+      <span>{dateText}</span>
+    </div>
+  );
 }
-
 
 /** RepliesSection */
 function RepliesSection({ prayerId }: { prayerId: string }) {
@@ -444,6 +438,7 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
         .select('id, prayer_id, author_id, content, created_at')
         .eq('prayer_id', prayerId)
         .order('created_at', { ascending: false })
+        .order('id', { ascending: false }) // tie-breaker for stable order
         .limit(20);
 
       if (error) {
@@ -486,6 +481,7 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
       }
 
       if (data) {
+        // newest-first list → unshift
         setItems((prev) => [data as CommentRow, ...prev]);
         setContent('');
         setReplyCount((n) => n + 1);
