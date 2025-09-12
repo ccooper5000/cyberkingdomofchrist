@@ -5,7 +5,7 @@ import { Home, Users, Settings, DollarSign, Circle, Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/hooks/useAuth';
-import { auth } from '@/lib/supabase';
+import { supabase } from '@/lib/supabase';
 import FlashBanner from '@/components/FlashBanner';
 
 function NavLinks({
@@ -53,8 +53,6 @@ export default function Navigation() {
 
   // Mobile menu state
   const [mobileOpen, setMobileOpen] = useState(false);
-
-  // Wrap the whole nav row so we can detect outside clicks
   const rowRef = useRef<HTMLDivElement | null>(null);
 
   const navItems = [
@@ -66,22 +64,37 @@ export default function Navigation() {
   ];
 
   const handleSignOut = async () => {
+    if (busy) return;
     setBusy(true);
-    const { error } = await auth.signOut();
-    setBusy(false);
-    if (error) {
-      console.error('Sign out error:', error);
-      return;
-    }
-    navigate('/login', {
-      replace: true,
-      state: {
-        flash: {
-          kind: 'info',
-          text: 'You have successfully logged out, have a blessed day.',
+    try {
+      // Prefer global to revoke refresh token; fall back to local if needed.
+      const { error } = await supabase.auth.signOut({ scope: 'global' });
+      if (error) {
+        console.error('[nav] signOut(global) error:', error);
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      }
+    } finally {
+      setBusy(false);
+      setMobileOpen(false);
+      // Navigate with flash (will auto-dismiss in 3s)
+      navigate('/login', {
+        replace: true,
+        state: {
+          flash: {
+            kind: 'info',
+            text: 'You have successfully logged out, have a blessed day.',
+            onceKey: `logout:${Date.now()}`,
+          },
         },
-      },
-    });
+      });
+      // Safety check: if session still exists (rare mobile Safari issue), hard refresh.
+      setTimeout(async () => {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session) {
+          window.location.assign('/login');
+        }
+      }, 60);
+    }
   };
 
   // Close mobile menu when the route changes

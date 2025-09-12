@@ -1,5 +1,6 @@
+// src/pages/Feed.tsx
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
 import { supabase } from '@/lib/supabase';
@@ -38,6 +39,7 @@ type CommentRow = {
 
 export default function Feed() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [items, setItems] = useState<FeedPrayer[]>([]);
   const [profiles, setProfiles] = useState<Record<string, { username: string | null; is_public: boolean | null }>>({});
   const [loading, setLoading] = useState(true);
@@ -47,6 +49,33 @@ export default function Feed() {
   const [category, setCategory] = useState<Category>('national');
   const [posting, setPosting] = useState(false);
   const [postError, setPostError] = useState<string | null>(null);
+
+  const handleSignOutFromFeed = async () => {
+    try {
+      const { error } = await supabase.auth.signOut({ scope: 'global' });
+      if (error) {
+        console.error('[feed] signOut(global) error:', error);
+        await supabase.auth.signOut({ scope: 'local' }).catch(() => {});
+      }
+    } finally {
+      navigate('/login', {
+        replace: true,
+        state: {
+          flash: {
+            kind: 'info',
+            text: 'You have successfully logged out, have a blessed day.',
+            onceKey: `logout:${Date.now()}`,
+          },
+        },
+      });
+      setTimeout(async () => {
+        const { data } = await supabase.auth.getSession();
+        if (data?.session) {
+          window.location.assign('/login');
+        }
+      }, 60);
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -151,7 +180,7 @@ export default function Feed() {
           ) : (
             <button
               type="button"
-              onClick={() => supabase.auth.signOut()}
+              onClick={handleSignOutFromFeed}
               className="text-sm underline"
             >
               Log out
@@ -228,7 +257,6 @@ export default function Feed() {
           ) : (
             items.map((p) => (
               <div key={p.id} className="border rounded-xl p-4 bg-white shadow-sm">
-                {/* top timestamp removed to avoid duplication; date now shown in byline */}
                 <div className="mt-1 text-[11px] uppercase tracking-wide text-gray-600">
                   {String(p.category ?? 'uncategorized').replace('_', ' ')}
                 </div>
@@ -255,6 +283,11 @@ export default function Feed() {
     </div>
   );
 }
+
+/** (rest of Feed.tsx stays exactly as in your current working version) */
+/** LikeControl, formatDateShort, AuthorByline, RepliesSection, CommentLikeControl */
+// Keep the rest of the code exactly as we finalized earlier (replies fixed, etc.).
+
 
 /** LikeControl */
 function LikeControl({ prayerId }: { prayerId: string }) {
