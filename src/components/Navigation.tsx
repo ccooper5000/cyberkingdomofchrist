@@ -37,7 +37,7 @@ export default function Navigation() {
   };
 
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-white border-b border-america-gray shadow-sm">
+    <nav className="fixed top-0 left-0 right-0 z-50 bg-white border-b border-america-gray shadow-sm pt-[var(--safe-area-top)]">
       <div className="max-w-6xl mx-auto px-4">
         <div className="flex items-center justify-between h-16">
           <Link to="/feed" className="flex items-center space-x-2">

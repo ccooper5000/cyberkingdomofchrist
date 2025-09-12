@@ -2,6 +2,25 @@
 @tailwind components;
 @tailwind utilities;
 
+/* --- Mobile safe-area & dynamic viewport fixes --- */
+:root {
+  --safe-area-top: env(safe-area-inset-top);
+  --safe-area-bottom: env(safe-area-inset-bottom);
+}
+
+/* Use dynamic viewport height (with a 100vh fallback) */
+html, body, #root {
+  min-height: 100vh;
+  min-height: 100dvh; /* modern mobile browsers */
+}
+
+/* Prevent bottom UI chrome from obscuring content */
+body {
+  padding-bottom: var(--safe-area-bottom);
+  -webkit-tap-highlight-color: transparent;
+}
+
+
 /* CYBERKINGDOM America-Centric Color Palette */
 :root {
   /* Core America Colors */

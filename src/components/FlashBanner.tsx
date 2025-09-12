@@ -33,7 +33,7 @@ export default function FlashBanner() {
       : 'border-green-300 bg-green-50 text-green-800';
 
   return (
-    <div className="fixed top-16 right-4 z-[60]">
+    <div className="fixed right-4 top-[calc(4rem+var(--safe-area-top))] z-[60]">
       <div className={`px-4 py-2 rounded-lg shadow border ${color}`}>
         {flash.text}
       </div>

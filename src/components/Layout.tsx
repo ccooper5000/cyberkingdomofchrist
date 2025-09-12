@@ -5,12 +5,13 @@ import { Toaster } from '@/components/ui/toaster';
 
 export default function Layout() {
   return (
-    <div className="min-h-screen bg-background">
-      <Navigation />
-      <main className="pt-16">
-        <Outlet />
-      </main>
-      <Toaster />
-    </div>
+    <div className="min-h-[100dvh] bg-background">
+  <Navigation />
+  <main className="pt-[calc(4rem+var(--safe-area-top))]">
+    <Outlet />
+  </main>
+  <Toaster />
+</div>
+
   );
 }
