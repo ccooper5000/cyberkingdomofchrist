@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { Link } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
-
+import { useAuth } from '@/hooks/useAuth';
 
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
@@ -28,6 +28,13 @@ export default function SettingsPage() {
   const [isPublicError, setIsPublicError] = useState<string | null>(null)
   const [isPublicSavedAt, setIsPublicSavedAt] = useState<number | null>(null)
 
+  // Email notification prefs
+  const [emailOnLike, setEmailOnLike] = useState<boolean>(true)
+  const [emailOnReply, setEmailOnReply] = useState<boolean>(true)
+  const [notifSaving, setNotifSaving] = useState<boolean>(false)
+  const [notifError, setNotifError] = useState<string | null>(null)
+  const [notifSavedAt, setNotifSavedAt] = useState<number | null>(null)
+
   // Username availability status
   const [usernameStatus, setUsernameStatus] = useState<
     'idle' | 'checking' | 'available' | 'taken' | 'error'
@@ -43,15 +50,14 @@ export default function SettingsPage() {
   const [justSaved, setJustSaved] = useState(false)
 
   type JoinedGroup = {
-  id: string
-  name: string
-  description: string | null
-}
+    id: string
+    name: string
+    description: string | null
+  }
 
-const [joinedGroups, setJoinedGroups] = useState<JoinedGroup[]>([])
-const [groupsLoading, setGroupsLoading] = useState(false)
-const [groupsError, setGroupsError] = useState<string | null>(null)
-
+  const [joinedGroups, setJoinedGroups] = useState<JoinedGroup[]>([])
+  const [groupsLoading, setGroupsLoading] = useState(false)
+  const [groupsError, setGroupsError] = useState<string | null>(null)
 
   useEffect(() => {
     let active = true
@@ -67,6 +73,17 @@ const [groupsError, setGroupsError] = useState<string | null>(null)
         setIsPublic((data as any).is_public ?? true)
         setMyUserId((data as any).id ?? null)
 
+        // Load email notification prefs (default true if absent)
+        setEmailOnLike(
+          (data as any).email_on_prayer_like === null || (data as any).email_on_prayer_like === undefined
+            ? true
+            : Boolean((data as any).email_on_prayer_like)
+        )
+        setEmailOnReply(
+          (data as any).email_on_prayer_reply === null || (data as any).email_on_prayer_reply === undefined
+            ? true
+            : Boolean((data as any).email_on_prayer_reply)
+        )
       }
       setLoading(false)
     })()
@@ -76,52 +93,51 @@ const [groupsError, setGroupsError] = useState<string | null>(null)
   }, [])
 
   // Load groups this user has joined
-useEffect(() => {
-  if (!myUserId) return
-  let active = true
-  ;(async () => {
-    setGroupsLoading(true)
-    setGroupsError(null)
-    try {
-      // 1) memberships → group ids
-      const { data: mData, error: mErr } = await supabase
-        .from('group_members')
-        .select('group_id')
-        .eq('user_id', myUserId)
+  useEffect(() => {
+    if (!myUserId) return
+    let active = true
+    ;(async () => {
+      setGroupsLoading(true)
+      setGroupsError(null)
+      try {
+        // 1) memberships → group ids
+        const { data: mData, error: mErr } = await supabase
+          .from('group_members')
+          .select('group_id')
+          .eq('user_id', myUserId)
 
-      if (mErr) throw mErr
-      if (!active) return
+        if (mErr) throw mErr
+        if (!active) return
 
-      const ids = Array.from(new Set((mData ?? []).map((r: any) => r.group_id)))
-      if (ids.length === 0) {
-        setJoinedGroups([])
-        return
+        const ids = Array.from(new Set((mData ?? []).map((r: any) => r.group_id)))
+        if (ids.length === 0) {
+          setJoinedGroups([])
+          return
+        }
+
+        // 2) groups by id
+        const { data: gData, error: gErr } = await supabase
+          .from('groups')
+          .select('id, name, description')
+          .in('id', ids)
+          .order('name', { ascending: true })
+
+        if (gErr) throw gErr
+        if (!active) return
+
+        setJoinedGroups((gData ?? []) as JoinedGroup[])
+      } catch (e: any) {
+        if (!active) return
+        setGroupsError(e?.message || 'Could not load groups.')
+      } finally {
+        if (!active) return
+        setGroupsLoading(false)
       }
-
-      // 2) groups by id
-      const { data: gData, error: gErr } = await supabase
-        .from('groups')
-        .select('id, name, description')
-        .in('id', ids)
-        .order('name', { ascending: true })
-
-      if (gErr) throw gErr
-      if (!active) return
-
-      setJoinedGroups((gData ?? []) as JoinedGroup[])
-    } catch (e: any) {
-      if (!active) return
-      setGroupsError(e?.message || 'Could not load groups.')
-    } finally {
-      if (!active) return
-      setGroupsLoading(false)
+    })()
+    return () => {
+      active = false
     }
-  })()
-  return () => {
-    active = false
-  }
-}, [myUserId])
-
+  }, [myUserId])
 
   // Debounced username availability check (treat current username as available)
   useEffect(() => {
@@ -218,6 +234,38 @@ useEffect(() => {
       setIsPublicError(err?.message || 'Network error')
     } finally {
       setIsPublicSaving(false)
+    }
+  }
+
+  // Generic handler for email preference toggles (likes/replies)
+  async function onToggleEmailPref(
+    key: 'email_on_prayer_like' | 'email_on_prayer_reply',
+    next: boolean
+  ) {
+    if (notifSaving) return
+    // optimistic UI
+    setNotifError(null)
+    setNotifSavedAt(null)
+    if (key === 'email_on_prayer_like') setEmailOnLike(next)
+    if (key === 'email_on_prayer_reply') setEmailOnReply(next)
+    setNotifSaving(true)
+
+    try {
+      const res = await saveMyProfile({ [key]: next } as any)
+      if (!res.ok) {
+        // rollback
+        if (key === 'email_on_prayer_like') setEmailOnLike(!next)
+        if (key === 'email_on_prayer_reply') setEmailOnReply(!next)
+        setNotifError(res.error || 'Could not save. Please try again.')
+      } else {
+        setNotifSavedAt(Date.now())
+      }
+    } catch (err: any) {
+      if (key === 'email_on_prayer_like') setEmailOnLike(!next)
+      if (key === 'email_on_prayer_reply') setEmailOnReply(!next)
+      setNotifError(err?.message || 'Network error')
+    } finally {
+      setNotifSaving(false)
     }
   }
 
@@ -356,69 +404,89 @@ useEffect(() => {
         </Card>
 
         {/* Group Memberships */}
-<Card>
-  <CardHeader>
-    <CardTitle>Group Memberships</CardTitle>
-    <CardDescription>Groups you’ve joined</CardDescription>
-  </CardHeader>
-  <CardContent className="space-y-4">
-    {groupsLoading && <div className="text-sm text-gray-600">Loading groups…</div>}
-    {groupsError && <div className="text-sm text-red-600">{groupsError}</div>}
+        <Card>
+          <CardHeader>
+            <CardTitle>Group Memberships</CardTitle>
+            <CardDescription>Groups you’ve joined</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {groupsLoading && <div className="text-sm text-gray-600">Loading groups…</div>}
+            {groupsError && <div className="text-sm text-red-600">{groupsError}</div>}
 
-    {!groupsLoading && !groupsError && joinedGroups.length === 0 && (
-      <div className="text-sm text-gray-600">
-        You haven’t joined any groups yet.{' '}
-        <Link to="/groups" className="underline">Explore groups</Link>
-      </div>
-    )}
+            {!groupsLoading && !groupsError && joinedGroups.length === 0 && (
+              <div className="text-sm text-gray-600">
+                You haven’t joined any groups yet.{' '}
+                <Link to="/groups" className="underline">Explore groups</Link>
+              </div>
+            )}
 
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      {joinedGroups.map((g) => (
-        <Card key={g.id} className="p-4">
-          <Link to={`/g/${g.id}`} className="underline text-sm font-medium">
-            {g.name}
-          </Link>
-          {g.description && (
-            <div className="text-xs text-gray-600 mt-1">{g.description}</div>
-          )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {joinedGroups.map((g) => (
+                <Card key={g.id} className="p-4">
+                  <Link to={`/g/${g.id}`} className="underline text-sm font-medium">
+                    {g.name}
+                  </Link>
+                  {g.description && (
+                    <div className="text-xs text-gray-600 mt-1">{g.description}</div>
+                  )}
+                </Card>
+              ))}
+            </div>
+          </CardContent>
         </Card>
-      ))}
-    </div>
-  </CardContent>
-</Card>
 
-
-        {/* Privacy Settings */}
+        {/* Privacy & Notifications */}
         <Card>
           <CardHeader>
             <CardTitle>Privacy & Notifications</CardTitle>
             <CardDescription>Control your privacy and notification preferences</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="flex items-center justify-between">
+            {/* Email: like notifications */}
+            <div className="flex items-start justify-between gap-4">
               <div>
-                <Label>Prayer Notifications</Label>
+                <Label>Email me when someone likes my prayer</Label>
                 <p className="text-sm text-muted-foreground">
-                  Get notified when others pray for your requests
+                  Sends a short email when a user taps “Like” on your prayer.
                 </p>
+                {notifError && <p className="text-sm text-red-600 mt-1">{notifError}</p>}
+                {!notifError && notifSavedAt && (
+                  <p className="text-xs text-green-600 mt-1" aria-live="polite">Saved.</p>
+                )}
               </div>
-              <Switch />
+              <div className="flex items-center gap-3">
+                <Switch
+                  checked={emailOnLike}
+                  onCheckedChange={(v) => onToggleEmailPref('email_on_prayer_like', v)}
+                  disabled={notifSaving}
+                />
+                {notifSaving && <span className="text-xs text-gray-500">Saving…</span>}
+              </div>
             </div>
 
             <Separator />
 
-            <div className="flex items-center justify-between">
+            {/* Email: reply notifications */}
+            <div className="flex items-start justify-between gap-4">
               <div>
-                <Label>Group Invitations</Label>
+                <Label>Email me when someone replies to my prayer</Label>
                 <p className="text-sm text-muted-foreground">
-                  Allow others to invite you to groups
+                  Sends a short email when a user posts a reply under your prayer.
                 </p>
               </div>
-              <Switch />
+              <div className="flex items-center gap-3">
+                <Switch
+                  checked={emailOnReply}
+                  onCheckedChange={(v) => onToggleEmailPref('email_on_prayer_reply', v)}
+                  disabled={notifSaving}
+                />
+                {notifSaving && <span className="text-xs text-gray-500">Saving…</span>}
+              </div>
             </div>
 
             <Separator />
 
+            {/* Public profile */}
             <div className="flex items-center justify-between">
               <div>
                 <Label>Public Profile</Label>
