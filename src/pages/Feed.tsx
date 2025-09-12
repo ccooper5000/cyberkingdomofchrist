@@ -426,10 +426,8 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
     return () => { mounted = false; };
   }, [prayerId]);
 
-  async function loadIfNeeded() {
-    if (open && items.length > 0) return;
-    if (!open) return;
-
+  // fetch replies (newest first); separate function so we can call it with the intended state
+  async function fetchReplies() {
     setLoading(true);
     setError(null);
     try {
@@ -498,7 +496,8 @@ function RepliesSection({ prayerId }: { prayerId: string }) {
         onClick={() => {
           const next = !open;
           setOpen(next);
-          if (next) void loadIfNeeded();
+          // IMPORTANT: call the loader with the intended value (avoid stale 'open')
+          if (next && items.length === 0) void fetchReplies();
         }}
       >
         {open ? `Hide Replies (${replyCount})` : `Show Replies (${replyCount})`}

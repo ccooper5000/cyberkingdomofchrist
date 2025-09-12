@@ -89,7 +89,7 @@ export default function Navigation() {
     setMobileOpen(false);
   }, [location.pathname]);
 
-  // Close on outside click (no page-covering overlay needed)
+  // Close on outside click (no page-covering overlay)
   useEffect(() => {
     function handleDocClick(e: MouseEvent) {
       if (!mobileOpen) return;
@@ -152,18 +152,20 @@ export default function Navigation() {
             </button>
           </div>
 
-          {/* Mobile dropdown panel (no full-screen overlay) */}
+          {/* Mobile dropdown panel — compact popover sized to content */}
           {mobileOpen && (
             <div
               id="mobile-menu"
-              className="md:hidden absolute left-0 right-0 top-[calc(100%)] bg-white border-b shadow-md z-50"
+              className="md:hidden absolute right-2 top-[calc(100%+0.5rem)] z-50"
             >
-              <NavLinks
-                items={navItems}
-                pathname={location.pathname}
-                className="flex flex-col p-2"
-                onNavigate={() => setMobileOpen(false)}
-              />
+              <div className="bg-white border shadow-md rounded-xl p-5 w-max max-w-[calc(100vw-1rem)]">
+                <NavLinks
+                  items={navItems}
+                  pathname={location.pathname}
+                  className="flex flex-col gap-1"
+                  onNavigate={() => setMobileOpen(false)}
+                />
+              </div>
             </div>
           )}
         </div>
