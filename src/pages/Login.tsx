@@ -95,6 +95,28 @@ export default function Login() {
     }
   }, [username, mode])
 
+  const navigateWithWelcome = async () => {
+    // Fetch the freshly signed-in user so we can personalize the welcome
+    const { data } = await supabase.auth.getUser()
+    const u = data?.user
+    const uid = u?.id
+    const who =
+      (u?.user_metadata && (u.user_metadata.full_name || u.user_metadata.name)) ||
+      u?.email ||
+      'Welcome!'
+    navigate('/feed', {
+      replace: true,
+      state: {
+        flash: {
+          kind: 'welcome',
+          text: `Welcome, ${who}`,
+          // unique per login to show exactly once per session
+          onceKey: uid ? `welcome:${uid}:${Date.now()}` : `welcome:${Date.now()}`
+        }
+      }
+    })
+  }
+
   const doSignIn = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -124,7 +146,7 @@ export default function Login() {
       // Apply any pending profile from pre-confirmation
       await applyPendingProfileFromLocalStorage()
 
-      navigate('/feed')
+      await navigateWithWelcome()
     } finally {
       setBusy(false)
     }
@@ -188,7 +210,7 @@ export default function Login() {
           setPendingProfileLocal(profilePayload)
         }
 
-        navigate('/feed')
+        await navigateWithWelcome()
         return
       }
 
