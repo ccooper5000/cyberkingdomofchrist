@@ -240,8 +240,8 @@ export const outreach = {
   }): Promise<{ data: OutreachRequestRow[] | null; error: any }> => {
     const { data: presRows, error: presErr } = await supabase
       .from('representatives')
-      .select('id,email,name,office')
-      .or('office.ilike.%president%,name.ilike.%president%')
+      .select('id,email,name,office_name')
+      .or('office_name.ilike.%president%,name.ilike.%president%')
       .limit(3);
 
     if (presErr) return { data: null, error: presErr };
