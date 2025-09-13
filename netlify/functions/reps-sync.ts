@@ -2,12 +2,7 @@
 import type { Handler } from '@netlify/functions'
 import { createClient } from '@supabase/supabase-js'
 
-/**
- * Required env:
- *  - SUPABASE_URL
- *  - SUPABASE_SERVICE_ROLE_KEY
- *  - CONGRESS_API_KEY  (Data.gov key for Congress.gov)
- */
+// ── Env (server-only) ─────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL as string
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string
 const CONGRESS_API_KEY = process.env.CONGRESS_API_KEY as string
@@ -25,7 +20,7 @@ const missingEnv = () => {
   return miss
 }
 
-// ---------- HTTP helpers ----------
+// ── HTTP helpers ──────────────────────────────────────────────────────────────
 const jsonFetch = async (url: string) => {
   const res = await fetch(url, { headers: { Accept: 'application/json' } })
   if (!res.ok) {
@@ -34,7 +29,9 @@ const jsonFetch = async (url: string) => {
   }
   return res.json()
 }
+
 const congressApi = (pathOrQuery: string) => {
+  // Accept either "member?currentMember=true..." or "/member/TX/10"
   const root = 'https://api.congress.gov/v3/'
   const isQueryStyle = pathOrQuery.includes('?')
   const url = new URL(isQueryStyle ? `${root}${pathOrQuery}` : `${root}${pathOrQuery.replace(/^\//, '')}`)
@@ -43,7 +40,7 @@ const congressApi = (pathOrQuery: string) => {
   return url.toString()
 }
 
-// ---------- Shapes ----------
+// ── Shapes (simplified) ───────────────────────────────────────────────────────
 type MemberListItem = {
   bioguideId?: string
   name?: string
@@ -69,71 +66,112 @@ type MemberDetail = {
   }
 }
 
-// ---------- State normalization ----------
-const STATE_TO_CODE: Record<string, string> = {
-  ALABAMA:'AL', ALASKA:'AK', 'AMERICAN SAMOA':'AS', ARIZONA:'AZ', ARKANSAS:'AR', CALIFORNIA:'CA',
-  COLORADO:'CO', CONNECTICUT:'CT', DELAWARE:'DE', 'DISTRICT OF COLUMBIA':'DC', FLORIDA:'FL',
-  GEORGIA:'GA', GUAM:'GU', HAWAII:'HI', IDAHO:'ID', ILLINOIS:'IL', INDIANA:'IN', IOWA:'IA',
-  KANSAS:'KS', KENTUCKY:'KY', LOUISIANA:'LA', MAINE:'ME', 'MARSHALL ISLANDS':'MH',
-  MARYLAND:'MD', MASSACHUSETTS:'MA', MICHIGAN:'MI', MINNESOTA:'MN', MISSISSIPPI:'MS',
-  MISSOURI:'MO', MONTANA:'MT', NEBRASKA:'NE', NEVADA:'NV', 'NEW HAMPSHIRE':'NH',
-  'NEW JERSEY':'NJ', 'NEW MEXICO':'NM', 'NEW YORK':'NY', 'NORTH CAROLINA':'NC',
-  'NORTH DAKOTA':'ND', 'NORTHERN MARIANA ISLANDS':'MP', OHIO:'OH', OKLAHOMA:'OK', OREGON:'OR',
-  PALAU:'PW', PENNSYLVANIA:'PA', 'PUERTO RICO':'PR', 'RHODE ISLAND':'RI',
-  'SOUTH CAROLINA':'SC', 'SOUTH DAKOTA':'SD', TENNESSEE:'TN', TEXAS:'TX', UTAH:'UT',
-  VERMONT:'VT', 'VIRGIN ISLANDS':'VI', VIRGINIA:'VA', WASHINGTON:'WA', 'WEST VIRGINIA':'WV',
-  WISCONSIN:'WI', WYOMING:'WY'
+// ── State normalization ───────────────────────────────────────────────────────
+const STATE_NAME_TO_CODE: Record<string, string> = {
+  Alabama: 'AL', Alaska: 'AK', Arizona: 'AZ', Arkansas: 'AR', California: 'CA', Colorado: 'CO', Connecticut: 'CT',
+  Delaware: 'DE', 'District of Columbia': 'DC', Florida: 'FL', Georgia: 'GA', Hawaii: 'HI', Idaho: 'ID', Illinois: 'IL',
+  Indiana: 'IN', Iowa: 'IA', Kansas: 'KS', Kentucky: 'KY', Louisiana: 'LA', Maine: 'ME', Maryland: 'MD', Massachusetts: 'MA',
+  Michigan: 'MI', Minnesota: 'MN', Mississippi: 'MS', Missouri: 'MO', Montana: 'MT', Nebraska: 'NE', Nevada: 'NV',
+  'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC',
+  'North Dakota': 'ND', Ohio: 'OH', Oklahoma: 'OK', Oregon: 'OR', Pennsylvania: 'PA', 'Rhode Island': 'RI',
+  'South Carolina': 'SC', 'South Dakota': 'SD', Tennessee: 'TN', Texas: 'TX', Utah: 'UT', Vermont: 'VT',
+  Virginia: 'VA', Washington: 'WA', 'West Virginia': 'WV', Wisconsin: 'WI', Wyoming: 'WY'
 }
-const toUSPS = (s?: string | null): string | null => {
+const toUSPS = (s?: string | null) => {
   if (!s) return null
   const t = s.trim()
-  if (/^[A-Za-z]{2}$/.test(t)) return t.toUpperCase()
-  const up = t.toUpperCase()
-  return STATE_TO_CODE[up] || null
-}
-const normalizeDistrictString = (d?: string | number | null) => {
-  if (d === null || d === undefined || d === '') return null
-  const n = Number(d)
-  return Number.isFinite(n) ? String(n) : String(d).trim()
+  if (t.length === 2) return t.toUpperCase()
+  return STATE_NAME_TO_CODE[t] || null
 }
 
-// ---------- Division ID ----------
-const buildOcdDivisionId = (state2: string | null, chamber: 'senate' | 'house', district: string | null) => {
-  const base = 'ocd-division/country:us'
-  const st = state2 ? `/state:${state2.toLowerCase()}` : ''
-  if (chamber === 'senate') return `${base}${st}`
-  if (district) {
-    const n = Number(district)
-    const cd = Number.isFinite(n) ? String(n) : district
-    return `${base}${st}/cd:${cd}`
+// ── Congress.gov fetches ──────────────────────────────────────────────────────
+// Known reliable direct endpoint for one House member by state/district.
+const fetchHouseByStateDistrict = async (stateCode: string, district: string) => {
+  const url = congressApi(`/member/${encodeURIComponent(stateCode)}/${encodeURIComponent(district)}`)
+  const j = await jsonFetch(url)
+  // Response has a members array with one item (current member for that district)
+  const arr: any[] = Array.isArray(j?.members) ? j.members : []
+  return arr as MemberListItem[]
+}
+
+// Fall back: page current members list and locally filter to our state.
+const fetchCurrentMembersForState = async (stateCode: string) => {
+  let page = 1
+  const out: MemberListItem[] = []
+  // We’ll scan several pages; stop early once we’ve clearly found the state’s members.
+  while (page <= 6) {
+    const url = congressApi(`member?currentMember=true&limit=100&page=${page}`)
+    const j = await jsonFetch(url)
+    const members: any[] = Array.isArray(j?.members) ? j.members : []
+    for (const m of members) {
+      const stateNameOrCode = (m.state || '').toString()
+      const code = toUSPS(stateNameOrCode)
+      if (code === stateCode) out.push(m)
+    }
+    const nextUrl = j?.pagination?.next
+    if (!nextUrl) break
+    page += 1
   }
-  return `${base}${st}`
+  return out
 }
 
-// ---------- Extractors ----------
-const extractMembersFromList = (j: any): MemberListItem[] => {
-  if (!j) return []
-  if (Array.isArray(j.members)) return j.members
-  if (j.results && Array.isArray(j.results)) return j.results
-  if (j.members && Array.isArray(j.members.member)) return j.members.member
-  return []
-}
 const getMemberDetail = async (bioguideId: string): Promise<MemberDetail> => {
   const url = congressApi(`member/${encodeURIComponent(bioguideId)}?format=json`)
   return jsonFetch(url)
 }
-const termsIndicateChamber = (m: any, chamber: 'senate' | 'house') => {
-  const arr = (m?.terms?.item || m?.terms || []) as any[]
-  const want = chamber === 'senate' ? 'senate' : 'house'
-  return arr.some(t => String(t?.chamber || '').toLowerCase().includes(want))
+
+// ── Upsert helpers ────────────────────────────────────────────────────────────
+const toRepRow = (listItem: MemberListItem, detail: MemberDetail, chamber: 'senate' | 'house') => {
+  const m = detail?.member ?? {}
+  const photo = m?.depiction?.imageUrl ?? listItem?.depiction?.imageUrl ?? null
+  const website = m?.officialWebsiteUrl ?? null
+  const phone = m?.addressInformation?.phoneNumber ?? null
+
+  const stateCode = (m?.stateCode || listItem?.state || '').toString().toUpperCase() || null
+  const district =
+    chamber === 'house'
+      ? (String(m?.district ?? listItem?.district ?? '') || null)
+      : null
+
+  // We rarely get direct emails at federal level; fall back to website as contact form.
+  const contact_form_url = website || null
+
+  // Required elsewhere in your DB: division_id. Senators don’t have a CD; House does.
+  const division_id =
+    chamber === 'senate'
+      ? (stateCode ? `ocd-division/country:us/state:${stateCode.toLowerCase()}` : null)
+      : (stateCode && district ? `ocd-division/country:us/state:${stateCode.toLowerCase()}/cd:${String(district).toLowerCase()}` : null)
+
+  return {
+    civic_person_id: (m?.bioguideId || listItem?.bioguideId || '').trim() || null,
+    name: m?.directOrderName || listItem?.name || null,
+    party: m?.partyHistory?.[0]?.partyName || (listItem?.partyName ?? null),
+    photo_url: photo,
+
+    // ✅ Match your schema
+    office_name: chamber === 'senate' ? 'U.S. Senator' : 'U.S. Representative',
+    level: 'federal',
+    chamber,
+
+    state: stateCode,
+    district,
+
+    contact_email: null,
+    contact_form_url,
+    phone,
+    website,
+
+    twitter: null,
+    facebook: null,
+
+    term_end: null,
+    active: true,
+    division_id,          // important if your column is NOT NULL
+    last_synced: new Date().toISOString(),
+  }
 }
 
-// ---------- DB ----------
 const upsertRep = async (row: any) => {
-  // IMPORTANT: matches your outreach function expectations
-  // - office  (string)
-  // - email   (string | null)
-  // - division_id (NOT NULL)
   const { data, error } = await (supabase as any)
     .from('representatives')
     .upsert(row, { onConflict: 'civic_person_id' })
@@ -143,115 +181,7 @@ const upsertRep = async (row: any) => {
   return data?.id as string | null
 }
 
-// ---------- Gatherers with fallbacks ----------
-async function gatherCurrentMembers(
-  takeUntil: (m: MemberListItem) => boolean,
-  needCount: number,
-  maxPages = 30,
-  pageSize = 100
-): Promise<MemberListItem[]> {
-  let url = congressApi(`member?currentMember=true&format=json&limit=${pageSize}`)
-  const picked: MemberListItem[] = []
-  let page = 0
-  while (page < maxPages) {
-    const j = await jsonFetch(url)
-    const batch = extractMembersFromList(j)
-    for (const m of batch) {
-      if (takeUntil(m)) {
-        picked.push(m)
-        if (picked.length >= needCount) return picked
-      }
-    }
-    const next = j?.pagination?.next
-    if (!next) break
-    url = next
-    page += 1
-  }
-  return picked
-}
-async function findStateSenators(state2: string): Promise<MemberListItem[]> {
-  try {
-    const primary = congressApi(`member?state=${state2}&currentMember=true&format=json&limit=100`)
-    const j = await jsonFetch(primary)
-    const all = extractMembersFromList(j)
-    const filtered = all.filter(m => toUSPS(m.state) === state2 && termsIndicateChamber(m, 'senate'))
-    if (filtered.length >= 2) return filtered.slice(0, 2)
-  } catch {}
-  return gatherCurrentMembers(
-    (m) => toUSPS(m.state) === state2 && termsIndicateChamber(m, 'senate'),
-    2
-  )
-}
-async function findStateHouse(state2: string, district: string | null): Promise<MemberListItem[]> {
-  if (district) {
-    try {
-      const j = await jsonFetch(congressApi(`member/${state2}/${encodeURIComponent(district)}?currentMember=true&format=json`))
-      const list = extractMembersFromList(j)
-      const filtered = list.filter(m => toUSPS(m.state) === state2 && normalizeDistrictString(m.district) === district)
-      if (filtered.length) return [filtered[0]]
-    } catch {}
-  }
-  return gatherCurrentMembers(
-    (m) => {
-      const isState = toUSPS(m.state) === state2
-      if (!isState) return false
-      if (!district) return termsIndicateChamber(m, 'house')
-      return normalizeDistrictString(m.district) === district && termsIndicateChamber(m, 'house')
-    },
-    district ? 1 : 36
-  )
-}
-
-// ---------- Row normalization (matches your schema) ----------
-const toRepRow = (
-  listItem: MemberListItem,
-  detail: MemberDetail,
-  chamber: 'senate' | 'house',
-  expectedState2: string
-) => {
-  const m = detail?.member ?? {}
-  const photo = m?.depiction?.imageUrl ?? listItem?.depiction?.imageUrl ?? null
-  const website = m?.officialWebsiteUrl ?? null
-  const phone = m?.addressInformation?.phoneNumber ?? null
-
-  const state2 = toUSPS(m?.stateCode || listItem?.state) || expectedState2
-  const district = chamber === 'house'
-    ? normalizeDistrictString(m?.district ?? listItem?.district)
-    : null
-
-  const division_id = buildOcdDivisionId(state2, chamber, district)
-
-  return {
-    civic_person_id: (m?.bioguideId || listItem?.bioguideId || '').trim() || null,
-
-    name: m?.directOrderName || listItem?.name || null,
-    party: m?.partyHistory?.[0]?.partyName || (listItem?.partyName ?? null),
-    photo_url: photo,
-
-    // IMPORTANT: your schema/outreach expects 'office' and 'email'
-    office: chamber === 'senate' ? 'U.S. Senator' : 'U.S. Representative',
-    email: null, // Congress.gov rarely provides email; stays null for federal
-
-    level: 'federal',
-    chamber,
-
-    state: state2,
-    district,
-    division_id,
-
-    website,
-    phone,
-
-    twitter: null,
-    facebook: null,
-
-    term_end: null,
-    active: true,
-    last_synced: new Date().toISOString(),
-  }
-}
-
-// ---------- Handler ----------
+// ── Handler ───────────────────────────────────────────────────────────────────
 export const handler: Handler = async (event) => {
   try {
     const miss = missingEnv()
@@ -263,68 +193,85 @@ export const handler: Handler = async (event) => {
     }
 
     const qs = event.queryStringParameters || {}
-    const state2 = toUSPS((qs.state || '').toString())
-    const houseDistrict = normalizeDistrictString(qs.house_district || '')
-    const includeHouse = qs.include_house !== 'false'
-    const includeSenate = qs.include_senate !== 'false'
+    const stateParam = (qs.state || '').toString().trim()
+    const districtParam = (qs.house_district || '').toString().trim()
 
-    if (!state2) {
-      return { statusCode: 400, body: JSON.stringify({ ok: false, message: 'Provide ?state=TX (two-letter or full name).' }) }
+    const stateCode = toUSPS(stateParam) || toUSPS(stateParam.toUpperCase()) // accept “TX” or “Texas”
+    if (!stateCode) {
+      return { statusCode: 400, body: JSON.stringify({ ok: false, message: 'Provide ?state=TX (2-letter) or full name' }) }
     }
 
-    const results: any[] = []
+    const results: Array<{ office: string; name: string; ok: boolean; error?: string }> = []
 
-    if (includeSenate) {
-      const senateList = (await findStateSenators(state2))
-        .filter(m => toUSPS(m.state) === state2 && termsIndicateChamber(m, 'senate'))
-        .slice(0, 2)
+    // 1) Senators (2)
+    {
+      const all = await fetchCurrentMembersForState(stateCode)
+      const senateCandidates = all.filter((m) => {
+        const terms = (m as any)?.terms || []
+        return terms.some((t: any) => String(t?.chamber || '').toLowerCase() === 'senate')
+      })
 
-      for (const m of senateList) {
-        const bioguide = (m.bioguideId || '').trim()
-        if (!bioguide) continue
+      // Pull details + upsert
+      for (const s of senateCandidates) {
+        const detail = await getMemberDetail(s.bioguideId!)
+        const row = toRepRow(s, detail, 'senate')
         try {
-          const detail = await getMemberDetail(bioguide)
-          const row = toRepRow(m, detail, 'senate', state2)
-          if (!row.civic_person_id) continue
-          await upsertRep(row)
-          results.push({ scope: 'senate', ok: true, bioguideId: bioguide })
-        } catch (e) {
-          results.push({ scope: 'senate', ok: false, bioguideId: bioguide, error: (e as Error).message })
+          const repId = await upsertRep(row)
+          if (repId && row.division_id) {
+            await (supabase as any)
+              .from('representative_divisions')
+              .upsert({ rep_id: repId, ocd_division_id: row.division_id }, { onConflict: 'rep_id,ocd_division_id' })
+          }
+          results.push({ office: 'U.S. Senator', name: row.name || '(unknown)', ok: true })
+        } catch (e: any) {
+          results.push({ office: 'U.S. Senator', name: row.name || '(unknown)', ok: false, error: e?.message || 'upsert failed' })
         }
       }
     }
 
-    if (includeHouse) {
-      const houseList = await findStateHouse(state2, houseDistrict || null)
-      const filtered = houseDistrict
-        ? houseList.filter(m => toUSPS(m.state) === state2 && normalizeDistrictString(m.district) === houseDistrict && termsIndicateChamber(m, 'house')).slice(0, 1)
-        : houseList.filter(m => toUSPS(m.state) === state2 && termsIndicateChamber(m, 'house'))
-
-      for (const m of filtered) {
-        const bioguide = (m.bioguideId || '').trim()
-        if (!bioguide) continue
+    // 2) House (one or more; direct by district if provided)
+    if (districtParam) {
+      const list = await fetchHouseByStateDistrict(stateCode, districtParam)
+      for (const h of list) {
+        const detail = await getMemberDetail(h.bioguideId!)
+        const row = toRepRow(h, detail, 'house')
         try {
-          const detail = await getMemberDetail(bioguide)
-          const row = toRepRow(m, detail, 'house', state2)
-          if (!row.civic_person_id) continue
-          await upsertRep(row)
-          results.push({ scope: 'house', ok: true, bioguideId: bioguide, district: row.district })
-        } catch (e) {
-          results.push({ scope: 'house', ok: false, bioguideId: bioguide, error: (e as Error).message })
+          const repId = await upsertRep(row)
+          if (repId && row.division_id) {
+            await (supabase as any)
+              .from('representative_divisions')
+              .upsert({ rep_id: repId, ocd_division_id: row.division_id }, { onConflict: 'rep_id,ocd_division_id' })
+          }
+          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: true })
+        } catch (e: any) {
+          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: false, error: e?.message || 'upsert failed' })
+        }
+      }
+    } else {
+      // No specific district: fall back to list + local filter for House
+      const all = await fetchCurrentMembersForState(stateCode)
+      const houseCandidates = all.filter((m) => {
+        const terms = (m as any)?.terms || []
+        return terms.some((t: any) => String(t?.chamber || '').toLowerCase() === 'house')
+      })
+      for (const h of houseCandidates) {
+        const detail = await getMemberDetail(h.bioguideId!)
+        const row = toRepRow(h, detail, 'house')
+        try {
+          const repId = await upsertRep(row)
+          if (repId && row.division_id) {
+            await (supabase as any)
+              .from('representative_divisions')
+              .upsert({ rep_id: repId, ocd_division_id: row.division_id }, { onConflict: 'rep_id,ocd_division_id' })
+          }
+          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: true })
+        } catch (e: any) {
+          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: false, error: e?.message || 'upsert failed' })
         }
       }
     }
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        ok: true,
-        state: state2,
-        houseDistrict: houseDistrict || null,
-        count: results.filter(r => r.ok).length,
-        results,
-      }),
-    }
+    return { statusCode: 200, body: JSON.stringify({ ok: true, state: stateCode, count: results.length, results }) }
   } catch (e: any) {
     return { statusCode: 500, body: JSON.stringify({ ok: false, message: e?.message || 'Server error' }) }
   }
