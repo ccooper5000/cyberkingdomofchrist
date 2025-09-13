@@ -609,7 +609,7 @@ export type Database = {
           instagram: string | null
           level: string | null
           name: string
-          office: string
+          office_name: string
           party: string | null
           phone: string | null
           source: string
@@ -629,7 +629,7 @@ export type Database = {
           instagram?: string | null
           level?: string | null
           name: string
-          office: string
+          office_name: string
           party?: string | null
           phone?: string | null
           source?: string
@@ -649,7 +649,7 @@ export type Database = {
           instagram?: string | null
           level?: string | null
           name?: string
-          office?: string
+          office_name?: string
           party?: string | null
           phone?: string | null
           source?: string
