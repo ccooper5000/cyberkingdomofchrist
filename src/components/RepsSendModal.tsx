@@ -6,6 +6,15 @@ import { assignRepsForCurrentUser } from '@/lib/reps';
 import { outreach, type OutreachChannel, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
 
+// DB row shape we read directly (real column names)
+type RepRowDB = {
+  id: string
+  name: string | null
+  office_name: string | null
+  state: string | null
+  district: string | null
+}
+
 type Rep = {
   id: string;
   name: string;     // plain name
@@ -123,17 +132,17 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
         if (ids.length) {
           const { data: repsRows, error: repsErr } = await supabase
             .from('representatives')
-            .select('id, name, office, state, district')
+            .select('id, name, office_name, state, district')
             .in('id', ids);
           if (repsErr) throw new Error(repsErr.message);
 
           list = (repsRows ?? []).map(r => ({
             id: r.id,
             name: r.name,
-            office: r.office,
+            office: r.office_name,
             state: r.state,
             district: r.district,
-            level: inferLevel(r.office),
+            level: inferLevel(r.office_name),
           }));
         }
 
