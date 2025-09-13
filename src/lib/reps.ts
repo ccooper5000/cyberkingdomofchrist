@@ -3,7 +3,15 @@ import { supabase } from '@/lib/supabase';
 import type { Database } from '@/types/database';
 
 type Tables = Database['public']['Tables'];
-type RepRow = Tables['representatives']['Row'];
+// NOTE: Your generated types still list `office` (stale) instead of `office_name`.
+// We'll avoid relying on that here.
+
+// Minimal runtime row shape we actually read from the DB:
+type RepRowDB = { id: string; state: string | null; office_name: string | null };
+
+// Local view used by our logic (keeps the rest of code unchanged)
+type RepLite = { id: string; state: string | null; office: string | null };
+
 type UserRepInsert = Tables['user_representatives']['Insert'];
 
 function zipToNumeric(zip: string): number | null {
@@ -55,7 +63,6 @@ function inferLevelFromOffice(office: string | null): UserRepInsert['level'] {
   return 'local';
 }
 
-
 /**
  * Ensure the current user has user_representatives rows based on their stored ZIP.
  * MVP: if ZIP is a Texas ZIP, link all reps where state='TX' (seeded reps).
@@ -79,22 +86,29 @@ export async function assignRepsForCurrentUser(): Promise<{ assigned: number; st
   const state = zipToState(addr?.postal_code || null);
   if (!state) return { assigned: 0, state: null, message: 'ZIP not supported in MVP mapping.' };
 
-  // fetch reps for that state (select only fields we use)
-  const { data: reps, error: rerr } = await supabase
+  // IMPORTANT:
+  // - We select real DB columns: id, state, office_name
+  // - We intentionally bypass the stale generated types with `as any`
+  const { data: reps, error: rerr } = await (supabase as any)
     .from('representatives')
-    .select('id, office, state')
+    .select('id, state, office_name')
     .eq('state', state);
 
   if (rerr) return { assigned: 0, state, message: rerr.message || 'Representative fetch failed.' };
 
-  const rows: UserRepInsert[] = (reps ?? []).map((r) => ({
+  const repsLite: RepLite[] = ((reps as RepRowDB[]) ?? []).map((r) => ({
+    id: r.id,
+    state: r.state ?? null,
+    office: r.office_name ?? null,
+  }));
+
+  if (!repsLite.length) return { assigned: 0, state, message: 'No seeded reps found for state.' };
+
+  const rows: UserRepInsert[] = repsLite.map((r) => ({
     user_id: userId,
     rep_id: r.id,
     level: inferLevelFromOffice(r.office),
-
   }));
-
-  if (!rows.length) return { assigned: 0, state, message: 'No seeded reps found for state.' };
 
   // upsert mappings (RLS: user can insert only their own). De-duped by (user_id, rep_id) unique index.
   const { error: ierr } = await supabase
