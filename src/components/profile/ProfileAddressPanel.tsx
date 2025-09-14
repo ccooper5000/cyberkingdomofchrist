@@ -24,39 +24,21 @@ type GeoResult = {
   hd: string | null
 }
 
-const CENSUS_ENDPOINT =
-  'https://geocoding.geo.census.gov/geocoder/geographies/address'
-
-async function geocodeAddress(oneLine: string): Promise<GeoResult> {
-  const u = new URL(CENSUS_ENDPOINT)
-  u.searchParams.set('benchmark', 'Public_AR_Current')
-  u.searchParams.set('vintage', 'Current_Current')
-  u.searchParams.set('format', 'json')
-  u.searchParams.set('address', oneLine)
-
-  const res = await fetch(u.toString())
-  if (!res.ok) throw new Error(`Geocoder failed (${res.status})`)
-  const json: any = await res.json()
-
-  const match = json?.result?.addressMatches?.[0]
-  const geos = match?.geographies || {}
-
-  const stateCode = match?.addressComponents?.state || null
-
-  const cdName = geos['Congressional Districts']?.[0]?.NAME || null
-  // cdName examples: "Congressional District 10", "Congressional District (at Large)"
-  let cd: string | null = null
-  if (cdName) {
-    const digits = cdName.match(/\d+/)?.[0]
-    cd = digits || 'At-Large'
-  }
-
-  const sldu = geos['State Legislative Districts - Upper']?.[0]?.NAME || null
-  const sldl = geos['State Legislative Districts - Lower']?.[0]?.NAME || null
-  const sd = sldu ? (sldu.match(/\d+/)?.[0] || null) : null
-  const hd = sldl ? (sldl.match(/\d+/)?.[0] || null) : null
-
-  return { state: stateCode || null, cd, sd, hd }
+// Server-side proxy (avoids Census CORS issues)
+async function geocodeAddressViaServer(payload: {
+  line1?: string | null
+  city?: string | null
+  state?: string | null
+  postal_code?: string | null
+}): Promise<GeoResult> {
+  const res = await fetch('/.netlify/functions/geo-detect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const j = await res.json()
+  if (!res.ok) throw new Error(j?.error || 'Detection failed.')
+  return j as GeoResult
 }
 
 export default function ProfileAddressPanel() {
@@ -77,7 +59,7 @@ export default function ProfileAddressPanel() {
   const [line1, setLine1] = useState('')
   const [persistStreet, setPersistStreet] = useState(false)
 
-  // Detected districts from client-side geocoder
+  // Detected districts from proxy geocoder
   const [detBusy, setDetBusy] = useState(false)
   const [detMsg, setDetMsg] = useState<string | null>(null)
   const [det, setDet] = useState<GeoResult>({ state: null, cd: null, sd: null, hd: null })
@@ -136,9 +118,12 @@ export default function ProfileAddressPanel() {
       setDetBusy(true)
       setDetMsg('Detecting your districts…')
 
-      const parts = [line1 || null, city || null, st || null, postal || null].filter(Boolean)
-      const oneLine = parts.join(', ')
-      const r = await geocodeAddress(oneLine || postal)
+      const r = await geocodeAddressViaServer({
+        line1: line1 || null,
+        city: city || null,
+        state: st || null,
+        postal_code: postal || null,
+      })
 
       setDet(r)
       setDetMsg(`Found: ${r.state || st || '??'} • CD: ${r.cd || '—'} • SD: ${r.sd || '—'} • HD: ${r.hd || '—'}`)
@@ -284,7 +269,7 @@ export default function ProfileAddressPanel() {
         {okMsg && <p className="text-sm text-green-700">{okMsg}</p>}
 
         <p className="text-xs text-gray-500">
-          We use the U.S. Census Geocoder in your browser to derive districts. By default, only ZIP, state, and districts are stored.
+          We detect districts through a secure server proxy to the U.S. Census Geocoder. By default, only ZIP, state, and districts are stored.
           You can remove your street/city later — your districts will remain so the feature still works.
         </p>
       </CardContent>
