@@ -22,6 +22,7 @@ type GeoResult = {
   cd: string | null
   sd: string | null
   hd: string | null
+  note?: string | null
 }
 
 // Server-side proxy (avoids Census CORS issues)
@@ -59,12 +60,13 @@ export default function ProfileAddressPanel() {
   const [line1, setLine1] = useState('')
   const [persistStreet, setPersistStreet] = useState(false)
 
-  // Detected districts from proxy geocoder
+  // Detection state
   const [detBusy, setDetBusy] = useState(false)
-  const [detMsg, setDetMsg] = useState<string | null>(null)
-  const [det, setDet] = useState<GeoResult>({ state: null, cd: null, sd: null, hd: null })
+  const [detMsg, setDetMsg] = useState<string | null>(null) // always shown below buttons
+  const [det, setDet] = useState<GeoResult>({ state: null, cd: null, sd: null, hd: null, note: null })
 
   const needsDistricts = useMemo(() => !addr.cd || !addr.sd || !addr.hd, [addr])
+  const hasDetections = !!(det.state || det.cd || det.sd || det.hd)
 
   useEffect(() => {
     let alive = true
@@ -113,8 +115,22 @@ export default function ProfileAddressPanel() {
   const handleDetect = async () => {
     setError(null)
     setOkMsg(null)
+
+    if (!postal.trim()) {
+      setDetMsg('Please enter your ZIP code.')
+      return
+    }
+
+    // Client-side ZIP-only guard: encourage user to add state or city/street
+    const zipOnly = !!postal.trim() && !st.trim() && !city.trim() && !line1.trim()
+    if (zipOnly) {
+      const msg = 'ZIP-only is ambiguous. Add your state or city/street for accurate district detection.'
+      setDet({ state: null, cd: null, sd: null, hd: null, note: msg })
+      setDetMsg(msg)
+      return
+    }
+
     try {
-      if (!postal.trim()) throw new Error('Please enter your ZIP code.')
       setDetBusy(true)
       setDetMsg('Detecting your districts…')
 
@@ -126,10 +142,12 @@ export default function ProfileAddressPanel() {
       })
 
       setDet(r)
-      setDetMsg(`Found: ${r.state || st || '??'} • CD: ${r.cd || '—'} • SD: ${r.sd || '—'} • HD: ${r.hd || '—'}`)
+      setDetMsg(
+        (r.note ? `${r.note} ` : '') +
+        `Found: ${r.state || st || '??'} • CD: ${r.cd || '—'} • SD: ${r.sd || '—'} • HD: ${r.hd || '—'}`
+      )
     } catch (e: any) {
-      setDetMsg(null)
-      setError(e?.message || 'Detection failed.')
+      setDetMsg(e?.message || 'Detection failed.')
     } finally {
       setDetBusy(false)
     }
@@ -175,6 +193,7 @@ export default function ProfileAddressPanel() {
       await assignRepsForCurrentUser()
 
       setOkMsg('Saved. Your representatives list has been updated.')
+      setDetMsg(null)
       // refresh visible snapshot
       setAddr(a => ({
         postal_code: postal || a.postal_code,
@@ -191,8 +210,6 @@ export default function ProfileAddressPanel() {
       setSaving(false)
     }
   }
-
-  const hasDetections = !!(det.state || det.cd || det.sd || det.hd)
 
   return (
     <Card>
@@ -249,7 +266,7 @@ export default function ProfileAddressPanel() {
         {/* Detect + Save controls */}
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" onClick={handleDetect} disabled={detBusy || saving}>
-            {detBusy ? (detMsg || 'Detecting…') : 'Detect my districts'}
+            {detBusy ? 'Detecting…' : 'Detect my districts'}
           </Button>
           <Button type="button" onClick={handleSave} disabled={saving || detBusy}>
             {saving ? 'Saving…' : 'Save'}
@@ -263,6 +280,15 @@ export default function ProfileAddressPanel() {
             </span>
           )}
         </div>
+
+        {/* Live status + guidance (always visible when present) */}
+        {(detMsg || det.note) && (
+          <p className="text-xs mt-1" aria-live="polite">
+            <span className={det.note ? 'text-amber-700' : 'text-gray-700'}>
+              {detMsg || det.note}
+            </span>
+          </p>
+        )}
 
         {/* Notices */}
         {error && <p className="text-sm text-red-600">{error}</p>}
