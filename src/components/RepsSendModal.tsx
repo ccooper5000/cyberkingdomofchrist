@@ -1,32 +1,40 @@
 // src/components/RepsSendModal.tsx
-
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { assignRepsForCurrentUser } from '@/lib/reps';
 import { outreach, type OutreachChannel, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Types
+// ──────────────────────────────────────────────────────────────────────────────
+
 // DB row shape we read directly (real column names)
 type RepRowDB = {
-  id: string
-  name: string | null
-  office_name: string | null
-  state: string | null
-  district: string | null
-}
+  id: string;
+  name: string | null;
+  office_name: string | null;
+  state: string | null;
+  district: string | null;
+  level: 'federal' | 'state' | 'local' | null;
+};
 
+// Local shape used by the UI (what the JSX renders)
 type Rep = {
   id: string;
   name: string;     // plain name
   office: string;   // "U.S. Senator", "U.S. Representative", "State Senator", "State Representative"
   state: string | null;
-  district: string | null; // "TX-21" or "TX-99"
+  district: string | null; // "21" etc. (label formatter will add "TX-21")
   level: 'federal' | 'state' | 'local';
 };
-type Tier = 'free' | 'supporter' | 'patron' | 'admin';
 
+type Tier = 'free' | 'supporter' | 'patron' | 'admin';
 type Props = { prayerId: string; onClose: () => void };
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
 function normalizeOffice(office: string | null): string {
   return (office || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
 }
@@ -91,13 +99,16 @@ function capForTier(tier: Tier | null): number {
   }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Component
+// ──────────────────────────────────────────────────────────────────────────────
 export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [reps, setReps] = useState<Rep[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [channels, setChannels] = useState<Record<OutreachChannel, boolean>>({ email: true, x: false, facebook: false });
   const [subject, setSubject] = useState<string>('');
-  const [body, setBody] = useState<string>(''); // server will prepend greeting per recipient (Step 4)
+  const [body, setBody] = useState<string>(''); // server will prepend greeting per recipient
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -106,6 +117,9 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [dailyCap, setDailyCap] = useState<number>(5);
   const [usedToday, setUsedToday] = useState<number>(0);
 
+  // Level filter UI
+  const [levelFilter, setLevelFilter] = useState<'all' | 'federal' | 'state'>('all');
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -113,6 +127,7 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
         setLoading(true);
         setError(null);
 
+        // Ensure user->rep mappings exist based on their address
         await assignRepsForCurrentUser();
 
         const { data: ures, error: uerr } = await supabase.auth.getUser();
@@ -130,19 +145,21 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
         // Fetch reps
         let list: Rep[] = [];
         if (ids.length) {
-          const { data: repsRows, error: repsErr } = await supabase
+          const { data: repsRows, error: repsErr } = await (supabase as any)
             .from('representatives')
-            .select('id, name, office_name, state, district')
+            .select('id, name, office_name, state, district, level')
             .in('id', ids);
           if (repsErr) throw new Error(repsErr.message);
 
-          list = (repsRows ?? []).map(r => ({
+          list = ((repsRows as RepRowDB[]) ?? []).map(r => ({
             id: r.id,
-            name: r.name,
-            office: r.office_name,
-            state: r.state,
-            district: r.district,
-            level: inferLevel(r.office_name),
+            name: (r.name ?? 'Representative'),
+            office: (r.office_name ?? 'Representative'),
+            state: r.state ?? null,
+            district: r.district ?? null,
+            level: (r.level === 'federal' || r.level === 'state' || r.level === 'local')
+              ? r.level
+              : inferLevel(r.office_name),
           }));
         }
 
@@ -180,6 +197,11 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
           .eq('send_date', today);
         if (countErr) throw new Error(countErr.message);
 
+        if (!alive) return;
+
+        const defSel: Record<string, boolean> = {};
+        for (const r of list) defSel[r.id] = true;
+
         const defaultSubject = `Message from a Cyber Kingdom of Christ user: ${sender}`;
         const defaultBody =
 `${prayerRow?.content || '(prayer content)'}
@@ -187,11 +209,6 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
 Sincerely,
 ${sender}
 CyberKingdomOfChrist.org`;
-
-        if (!alive) return;
-
-        const defSel: Record<string, boolean> = {};
-        for (const r of list) defSel[r.id] = true;
 
         setReps(list);
         setSelected(defSel);
@@ -210,11 +227,18 @@ CyberKingdomOfChrist.org`;
     return () => { alive = false; };
   }, [prayerId]);
 
+  // Filtered list for display (All / Federal / State)
+  const displayReps = useMemo(() => {
+    if (levelFilter === 'all') return reps;
+    return (reps ?? []).filter((r) => r.level === levelFilter);
+  }, [reps, levelFilter]);
+
+  // Group by level for the UI sections
   const grouped = useMemo(() => {
     const g: Record<Rep['level'], Rep[]> = { federal: [], state: [], local: [] };
-    for (const r of reps) g[r.level].push(r);
+    for (const r of displayReps) g[r.level].push(r);
     return g;
-  }, [reps]);
+  }, [displayReps]);
 
   const selectedReps = useMemo(() => reps.filter(r => selected[r.id]), [reps, selected]);
   const greetingPreview = useMemo(() => selectedReps.slice(0, 3).map(r => greetingForRep(r)), [selectedReps]);
@@ -291,11 +315,40 @@ CyberKingdomOfChrist.org`;
         {loading ? (
           <p className="text-sm text-gray-600">Loading…</p>
         ) : reps.length === 0 ? (
-          <p className="text-sm text-gray-600">No representatives mapped for your ZIP.</p>
+          <p className="text-sm text-gray-600">No representatives mapped for your address yet.</p>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Left: recipients + channels */}
             <div>
+              {/* Level filter */}
+              <div className="mb-3 flex items-center gap-2">
+                <span className="text-sm font-medium">Level:</span>
+                <button
+                  type="button"
+                  onClick={() => setLevelFilter('all')}
+                  aria-pressed={levelFilter === 'all'}
+                  className={`px-2 py-1 rounded ${levelFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLevelFilter('federal')}
+                  aria-pressed={levelFilter === 'federal'}
+                  className={`px-2 py-1 rounded ${levelFilter === 'federal' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+                >
+                  Federal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLevelFilter('state')}
+                  aria-pressed={levelFilter === 'state'}
+                  className={`px-2 py-1 rounded ${levelFilter === 'state' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+                >
+                  State
+                </button>
+              </div>
+
               <div className="mb-3">
                 <div className="text-sm font-medium mb-2">Recipients</div>
                 <div className="border rounded-lg overflow-hidden">
