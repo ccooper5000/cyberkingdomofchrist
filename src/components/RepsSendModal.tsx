@@ -32,6 +32,17 @@ type Rep = {
 type Tier = 'free' | 'supporter' | 'patron' | 'admin';
 type Props = { prayerId: string; onClose: () => void };
 
+// Primary address snapshot for prompts
+type AddressInfo = {
+  postal_code: string | null;
+  state: string | null;
+  city?: string | null;
+  line1?: string | null;
+  cd?: string | null;  // congressional
+  sd?: string | null;  // state senate (upper)
+  hd?: string | null;  // state house (lower)
+};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -120,103 +131,137 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
   // Level filter UI
   const [levelFilter, setLevelFilter] = useState<'all' | 'federal' | 'state'>('all');
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
+  // Address prompt state
+  const [addr, setAddr] = useState<AddressInfo | null>(null);
+  const needsDistricts = useMemo(() => {
+    if (!addr) return false;
+    // We consider it "needing" if any of the three is missing
+    return !addr.cd || !addr.sd || !addr.hd;
+  }, [addr]);
+  const [enrichBusy, setEnrichBusy] = useState(false);
+  const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
 
-        // Ensure user->rep mappings exist based on their address
-        await assignRepsForCurrentUser();
+  // Shared loader so we can refresh after enrichment
+  const loadAll = async () => {
+    setLoading(true);
+    setError(null);
 
-        const { data: ures, error: uerr } = await supabase.auth.getUser();
-        if (uerr || !ures.user) { setError('Please sign in.'); setLoading(false); return; }
-        const userId = ures.user.id;
+    // Ensure user->rep mappings exist based on their address
+    await assignRepsForCurrentUser();
 
-        // Fetch mapping → ids
-        const { data: mapRows, error: mapErr } = await supabase
-          .from('user_representatives')
-          .select('rep_id')
-          .eq('user_id', userId);
-        if (mapErr) throw new Error(mapErr.message);
-        const ids = (mapRows ?? []).map(r => r.rep_id);
+    const { data: ures, error: uerr } = await supabase.auth.getUser();
+    if (uerr || !ures.user) { throw new Error('Please sign in.'); }
+    const userId = ures.user.id;
 
-        // Fetch reps
-        let list: Rep[] = [];
-        if (ids.length) {
-          const { data: repsRows, error: repsErr } = await (supabase as any)
-            .from('representatives')
-            .select('id, name, office_name, state, district, level')
-            .in('id', ids);
-          if (repsErr) throw new Error(repsErr.message);
+    // Fetch primary address (for prompt & enrichment params)
+    {
+      const { data: a, error: aerr } = await (supabase as any)
+        .from('user_addresses')
+        .select('postal_code, state, city, line1, cd, sd, hd')
+        .eq('user_id', userId)
+        .eq('is_primary', true)
+        .maybeSingle();
+      if (aerr) throw new Error(aerr.message);
+      setAddr({
+        postal_code: a?.postal_code ?? null,
+        state: a?.state ?? null,
+        city: a?.city ?? null,
+        line1: a?.line1 ?? null,
+        cd: a?.cd ?? null,
+        sd: a?.sd ?? null,
+        hd: a?.hd ?? null,
+      });
+    }
 
-          list = ((repsRows as RepRowDB[]) ?? []).map(r => ({
-            id: r.id,
-            name: (r.name ?? 'Representative'),
-            office: (r.office_name ?? 'Representative'),
-            state: r.state ?? null,
-            district: r.district ?? null,
-            level: (r.level === 'federal' || r.level === 'state' || r.level === 'local')
-              ? r.level
-              : inferLevel(r.office_name),
-          }));
-        }
+    // Fetch mapping → ids
+    const { data: mapRows, error: mapErr } = await supabase
+      .from('user_representatives')
+      .select('rep_id')
+      .eq('user_id', userId);
+    if (mapErr) throw new Error(mapErr.message);
+    const ids = (mapRows ?? []).map(r => r.rep_id);
 
-        // Prayer content for body
-        const { data: prayerRow, error: prayerErr } = await supabase
-          .from('prayers')
-          .select('content')
-          .eq('id', prayerId)
-          .maybeSingle();
-        if (prayerErr) throw new Error(prayerErr.message);
+    // Fetch reps
+    let list: Rep[] = [];
+    if (ids.length) {
+      const { data: repsRows, error: repsErr } = await (supabase as any)
+        .from('representatives')
+        .select('id, name, office_name, state, district, level')
+        .in('id', ids);
+      if (repsErr) throw new Error(repsErr.message);
 
-        // Profile (for sender + tier)
-        const { data: prof, error: profErr } = await supabase
-          .from('profiles')
-          .select('display_name, username, tier')
-          .eq('id', userId)
-          .maybeSingle();
-        if (profErr) throw new Error(profErr.message);
+      list = ((repsRows as RepRowDB[]) ?? []).map(r => ({
+        id: r.id,
+        name: (r.name ?? 'Representative'),
+        office: (r.office_name ?? 'Representative'),
+        state: r.state ?? null,
+        district: r.district ?? null,
+        level: (r.level === 'federal' || r.level === 'state' || r.level === 'local')
+          ? r.level
+          : inferLevel(r.office_name),
+      }));
+    }
 
-        const sender = String(prof?.display_name || prof?.username || 'CKoC Member');
+    // Prayer content for body
+    const { data: prayerRow, error: prayerErr } = await supabase
+      .from('prayers')
+      .select('content')
+      .eq('id', prayerId)
+      .maybeSingle();
+    if (prayerErr) throw new Error(prayerErr.message);
 
-        // profiles.tier is a string in your types; narrow to our Tier union safely
-        const rawTier = (prof?.tier ?? 'free') as string;
-        const normalizedTier = (['free', 'supporter', 'patron', 'admin'] as const).includes(rawTier as Tier)
-          ? (rawTier as Tier)
-          : 'free';
-        const cap = capForTier(normalizedTier);
+    // Profile (for sender + tier)
+    const { data: prof, error: profErr } = await supabase
+      .from('profiles')
+      .select('display_name, username, tier')
+      .eq('id', userId)
+      .maybeSingle();
+    if (profErr) throw new Error(profErr.message);
 
-        // Used today (server counts by send_date, which is UTC)
-        const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-        const { count: usedCnt, error: countErr } = await supabase
-          .from('outreach_requests')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', userId)
-          .eq('send_date', today);
-        if (countErr) throw new Error(countErr.message);
+    const sender = String(prof?.display_name || prof?.username || 'CKoC Member');
 
-        if (!alive) return;
+    // profiles.tier is a string in your types; narrow to our Tier union safely
+    const rawTier = (prof?.tier ?? 'free') as string;
+    const normalizedTier = (['free', 'supporter', 'patron', 'admin'] as const).includes(rawTier as Tier)
+      ? (rawTier as Tier)
+      : 'free';
+    const cap = capForTier(normalizedTier);
 
-        const defSel: Record<string, boolean> = {};
-        for (const r of list) defSel[r.id] = true;
+    // Used today (server counts by send_date, which is UTC)
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const { count: usedCnt, error: countErr } = await supabase
+      .from('outreach_requests')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('send_date', today);
+    if (countErr) throw new Error(countErr.message);
 
-        const defaultSubject = `Message from a Cyber Kingdom of Christ user: ${sender}`;
-        const defaultBody =
+    const defaultSubject = `Message from a Cyber Kingdom of Christ user: ${sender}`;
+    const defaultBody =
 `${prayerRow?.content || '(prayer content)'}
     
 Sincerely,
 ${sender}
 CyberKingdomOfChrist.org`;
 
-        setReps(list);
-        setSelected(defSel);
-        setSubject(defaultSubject);
-        setBody(defaultBody);
-        setTier(normalizedTier);
-        setDailyCap(cap);
-        setUsedToday(usedCnt ?? 0);
+    // default-select all that we loaded
+    const defSel: Record<string, boolean> = {};
+    for (const r of list) defSel[r.id] = true;
+
+    setReps(list);
+    setSelected(defSel);
+    setSubject(defaultSubject);
+    setBody(defaultBody);
+    setTier(normalizedTier);
+    setDailyCap(cap);
+    setUsedToday(usedCnt ?? 0);
+  };
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        await loadAll();
       } catch (e: any) {
         if (!alive) return;
         setError(e?.message || 'Failed to load data.');
@@ -249,6 +294,74 @@ CyberKingdomOfChrist.org`;
 
   const toggleRep = (id: string) => setSelected(prev => ({ ...prev, [id]: !prev[id] }));
   const toggleChannel = (ch: OutreachChannel) => { if (ch === 'email') setChannels(prev => ({ ...prev, email: !prev.email })); };
+
+  // Gentle address/district enrichment
+  const handleDetectDistricts = async () => {
+    try {
+      setEnrichBusy(true);
+      setEnrichMsg('Detecting your districts…');
+
+      const { data: ures, error: uerr } = await supabase.auth.getUser();
+      if (uerr || !ures.user) throw new Error('Please sign in.');
+      const userId = ures.user.id;
+
+      // Pull current address (to send to geocoder)
+      const { data: a, error: aerr } = await (supabase as any)
+        .from('user_addresses')
+        .select('postal_code, state, city, line1, cd, sd, hd')
+        .eq('user_id', userId)
+        .eq('is_primary', true)
+        .maybeSingle();
+      if (aerr) throw new Error(aerr.message);
+      if (!a?.postal_code) throw new Error('Please add a ZIP code to your profile address.');
+
+      // 1) Enrich via Census Geocoder (server function updates user_addresses)
+      const geoRes = await fetch('/.netlify/functions/geo-enrich', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: userId,
+          line1: a?.line1 ?? undefined,
+          city: a?.city ?? undefined,
+          state: a?.state ?? undefined,
+          postal_code: a?.postal_code,
+        }),
+      });
+      const gj = await geoRes.json();
+      if (!geoRes.ok) throw new Error(gj?.error || 'Geocoder enrichment failed.');
+      const st = String(gj?.state || a?.state || '').toUpperCase();
+      const cd = gj?.cd || a?.cd || null;
+      const sd = gj?.sd || a?.sd || null;
+      const hd = gj?.hd || a?.hd || null;
+
+      // 2) Seed federal reps (state + optional House district)
+      setEnrichMsg('Syncing federal representatives…');
+      const q1 = new URLSearchParams({ state: st });
+      if (cd && cd !== 'At-Large') q1.set('house_district', String(cd));
+      await fetch(`/.netlify/functions/reps-sync?${q1.toString()}`);
+
+      // 3) Seed state legislators (sd/hd if present)
+      if (sd || hd) {
+        setEnrichMsg('Syncing state legislators…');
+        const q2 = new URLSearchParams({ state: st });
+        if (sd) q2.set('sd', String(sd));
+        if (hd) q2.set('hd', String(hd));
+        await fetch(`/.netlify/functions/state-reps-sync?${q2.toString()}`);
+      }
+
+      // 4) Map user → representatives and refresh modal list
+      setEnrichMsg('Finalizing…');
+      await assignRepsForCurrentUser();
+      await loadAll();
+
+      setEnrichMsg(null);
+      setEnrichBusy(false);
+    } catch (e: any) {
+      setEnrichMsg(null);
+      setEnrichBusy(false);
+      setError(e?.message || 'District detection failed.');
+    }
+  };
 
   const handleSend = async () => {
     setError(null);
@@ -312,6 +425,27 @@ CyberKingdomOfChrist.org`;
           <div>Used today: <span className="font-semibold">{usedToday}</span> • Remaining: <span className="font-semibold">{Math.max(0, dailyCap - usedToday)}</span></div>
         </div>
 
+        {/* Gentle address prompt */}
+        {(!loading && (needsDistricts || reps.length === 0)) && (
+          <div className="mb-4 rounded-md border p-3 bg-amber-50 text-sm">
+            <div className="font-medium">Improve accuracy with your address</div>
+            <div className="text-xs mt-1">
+              We {addr?.cd ? '' : 'don’t know your congressional district'}
+              {(!addr?.cd && (!addr?.sd || !addr?.hd)) ? ', ' : ''}
+              {!addr?.sd || !addr?.hd ? 'and state legislative districts' : ''}
+              . Click the button below to detect your districts from your address/ZIP.
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <Button size="sm" onClick={handleDetectDistricts} disabled={enrichBusy}>
+                {enrichBusy ? (enrichMsg || 'Detecting…') : 'Detect my districts'}
+              </Button>
+              {addr?.postal_code && (
+                <span className="text-xs text-gray-600">Using ZIP: {addr.postal_code}{addr.state ? ` • State: ${addr.state}` : ''}</span>
+              )}
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <p className="text-sm text-gray-600">Loading…</p>
         ) : reps.length === 0 ? (
@@ -360,7 +494,7 @@ CyberKingdomOfChrist.org`;
                           <input
                             type="checkbox"
                             checked={!!selected[r.id]}
-                            onChange={() => toggleRep(r.id)}
+                            onChange={() => setSelected(prev => ({ ...prev, [r.id]: !prev[r.id] }))}
                             className="mt-1"
                           />
                           <div>
@@ -424,7 +558,7 @@ CyberKingdomOfChrist.org`;
 
         <div className="mt-6 flex justify-end gap-2">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleSend} disabled={busy || loading || reps.length === 0 || overCap}>
+          <Button onClick={handleSend} disabled={busy || loading || reps.length === 0 || overCap || enrichBusy}>
             {busy ? 'Queuing…' : 'Send'}
           </Button>
         </div>
