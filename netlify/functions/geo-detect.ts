@@ -2,7 +2,7 @@
 import type { Handler } from '@netlify/functions'
 
 // Census Geocoder (no key required)
-const CENSUS_ENDPOINT = 'https://geocoding.geo.census.gov/geocoder/geographies/address'
+const BASE = 'https://geocoding.geo.census.gov/geocoder/geographies'
 
 type Payload = {
   line1?: string | null
@@ -17,16 +17,6 @@ type GeoResult = {
   sd: string | null
   hd: string | null
   note?: string | null
-}
-
-function toOneLine(p: Payload): string {
-  const parts = [p.line1, p.city, p.state, p.postal_code].filter(Boolean)
-  // If we have at least two parts (e.g., "TX" + "78239" or "Austin" + "TX"), it’s usually good enough.
-  if (parts.length >= 2) return parts.join(', ')
-  // Fallback: if we have both state and ZIP, join them
-  if (p.state && p.postal_code) return `${p.postal_code} ${p.state}`
-  // Otherwise return what we have (may be ZIP-only)
-  return (p.postal_code ?? '').trim()
 }
 
 function parseGeos(json: any): GeoResult {
@@ -62,42 +52,76 @@ export const handler: Handler = async (event) => {
 
   try {
     const body: Payload = JSON.parse(event.body || '{}')
+    const street = (body.line1 || '').trim()
+    const city = (body.city || '').trim()
+    const state = (body.state || '').trim()
+    const zip = (body.postal_code || '').trim()
 
-    // Build a usable one-line address
-    const oneLine = toOneLine(body)
-
-    // If this is ZIP-only (no state/city/street), the Census endpoint often 400s.
-    // Return a 200 with empty results and a gentle note instead of bubbling a 400.
-    const zipOnly = !!oneLine && /^\d{5}(-\d{4})?$/.test(oneLine) &&
-      !body.state && !body.city && !body.line1
-    if (!oneLine || zipOnly) {
-      const note = !oneLine
-        ? 'Provide ZIP (and ideally city or street) to detect districts.'
+    // ZIP-only is ambiguous: return a soft 200 with guidance
+    const zipOnly = !!zip && !street && !city && !state
+    if (!zip || zipOnly) {
+      const note = !zip
+        ? 'Provide ZIP (and ideally state or city/street) to detect districts.'
         : 'ZIP-only is ambiguous. Add your state or city/street for accurate district detection.'
       const empty: GeoResult = { state: null, cd: null, sd: null, hd: null, note }
       return { statusCode: 200, headers, body: JSON.stringify(empty) }
     }
 
-    const url = new URL(CENSUS_ENDPOINT)
-    url.searchParams.set('benchmark', 'Public_AR_Current')
-    url.searchParams.set('vintage', 'Current_Current')
-    url.searchParams.set('format', 'json')
-    url.searchParams.set('address', oneLine)
+    // Prefer the structured endpoint when we have any of street/city/state
+    let resp: Response
+    let endpointUsed: 'address' | 'oneline' = 'address'
 
-    const resp = await fetch(url.toString())
+    if (street || city || state) {
+      const url = new URL(`${BASE}/address`)
+      if (street) url.searchParams.set('street', street)
+      if (city) url.searchParams.set('city', city)
+      if (state) url.searchParams.set('state', state)
+      if (zip) url.searchParams.set('zip', zip)
+      url.searchParams.set('benchmark', 'Public_AR_Current')
+      url.searchParams.set('vintage', 'Current_Current')
+      url.searchParams.set('format', 'json')
+
+      resp = await fetch(url.toString())
+      if (!resp.ok) {
+        // Fallback to oneline if structured failed (some quirky addresses)
+        endpointUsed = 'oneline'
+        const u2 = new URL(`${BASE}/onelineaddress`)
+        u2.searchParams.set('address', [street, city, state, zip].filter(Boolean).join(', '))
+        u2.searchParams.set('benchmark', 'Public_AR_Current')
+        u2.searchParams.set('vintage', 'Current_Current')
+        u2.searchParams.set('format', 'json')
+        resp = await fetch(u2.toString())
+      }
+    } else {
+      // Shouldn’t happen due to guard, but keep it safe
+      endpointUsed = 'oneline'
+      const u2 = new URL(`${BASE}/onelineaddress`)
+      u2.searchParams.set('address', [zip, state].filter(Boolean).join(' '))
+      u2.searchParams.set('benchmark', 'Public_AR_Current')
+      u2.searchParams.set('vintage', 'Current_Current')
+      u2.searchParams.set('format', 'json')
+      resp = await fetch(u2.toString())
+    }
+
     const text = await resp.text()
 
-    // If Census returns a non-OK status, don’t fail the UI — return empty with a helpful note.
+    // If Census still returns non-OK, respond softly with guidance instead of erroring
     if (!resp.ok) {
       const soft: GeoResult = {
         state: null, cd: null, sd: null, hd: null,
-        note: `Census returned ${resp.status}. Try adding city/street with your ZIP.`,
+        note: `Census returned ${resp.status} via ${endpointUsed}. Try adjusting your city/street and ensure 2-letter state.`,
       }
       return { statusCode: 200, headers, body: JSON.stringify(soft) }
     }
 
     const json = JSON.parse(text)
     const result = parseGeos(json)
+
+    // If parsing yielded nothing, include a tip so the UI shows guidance
+    if (!result.state && !result.cd && !result.sd && !result.hd) {
+      result.note = 'No districts found for that address. Try adding or correcting city/street (avoid ZIP+4).'
+    }
+
     return { statusCode: 200, headers, body: JSON.stringify(result) }
   } catch (e: any) {
     // Unexpected server error — still keep the UI happy with a 200 + empty payload.
