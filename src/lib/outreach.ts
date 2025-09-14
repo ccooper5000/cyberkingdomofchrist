@@ -87,13 +87,13 @@ export const outreach = {
     // Pull ONLY mapped reps that actually have an email
     const { data: reps, error: repsErr } = await supabase
       .from('user_representatives')
-      .select('rep_id, representatives!inner(id,email)')
+      .select('rep_id, representatives!inner(id,contact_email)')
       .eq('user_id', opts.userId);
 
     if (repsErr) return { data: null, error: repsErr };
 
     const repIdsWithEmail = (reps ?? [])
-      .filter((r: any) => r.representatives?.email)
+      .filter((r: any) => r.representatives?.contact_email)
       .map((r: any) => r.rep_id as string);
 
     // Requeue failed/throttled for today
@@ -166,14 +166,14 @@ export const outreach = {
     // Constrain to reps that are mapped to this user AND have an email
     const { data: reps, error: repsErr } = await supabase
       .from('user_representatives')
-      .select('rep_id, representatives!inner(id,email)')
+      .select('rep_id, representatives!inner(id,contact_email)')
       .eq('user_id', opts.userId)
       .in('rep_id', opts.repIds);
 
     if (repsErr) return { data: null, error: repsErr };
 
     const repIdsWithEmail = (reps ?? [])
-      .filter((r: any) => r.representatives?.email)
+      .filter((r: any) => r.representatives?.contact_email)
       .map((r: any) => r.rep_id as string);
 
     // Requeue failed/throttled for today
@@ -247,7 +247,7 @@ export const outreach = {
     if (presErr) return { data: null, error: presErr };
 
     const repIdsWithEmail = (presRows ?? [])
-      .filter((p: any) => p.email)
+      .filter((p: any) => p.contact_email)
       .map((p: any) => p.id as string);
 
     // Requeue failed/throttled for today
