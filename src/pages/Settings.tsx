@@ -10,6 +10,8 @@ import { Separator } from '@/components/ui/separator'
 import { Link } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { useAuth } from '@/hooks/useAuth';
+import ProfileAddressPanel from '@/components/profile/ProfileAddressPanel'
+
 
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
@@ -277,6 +279,9 @@ export default function SettingsPage() {
       </div>
 
       <form onSubmit={onSave} className="space-y-8">
+        {/* Address / Districts (privacy-first) */}
+        <ProfileAddressPanel />
+
         {/* Profile Settings */}
         <Card>
           <CardHeader>
