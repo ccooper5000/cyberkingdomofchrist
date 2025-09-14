@@ -16,11 +16,17 @@ type GeoResult = {
   cd: string | null
   sd: string | null
   hd: string | null
+  note?: string | null
 }
 
 function toOneLine(p: Payload): string {
   const parts = [p.line1, p.city, p.state, p.postal_code].filter(Boolean)
-  return parts.join(', ')
+  // If we have at least two parts (e.g., "TX" + "78239" or "Austin" + "TX"), it’s usually good enough.
+  if (parts.length >= 2) return parts.join(', ')
+  // Fallback: if we have both state and ZIP, join them
+  if (p.state && p.postal_code) return `${p.postal_code} ${p.state}`
+  // Otherwise return what we have (may be ZIP-only)
+  return (p.postal_code ?? '').trim()
 }
 
 function parseGeos(json: any): GeoResult {
@@ -56,11 +62,20 @@ export const handler: Handler = async (event) => {
 
   try {
     const body: Payload = JSON.parse(event.body || '{}')
-    // Build one-line address; ZIP-only is sometimes ambiguous and may fail.
-    // If only ZIP is provided, we include state when present to help disambiguate.
-    const oneLine = toOneLine(body) || [body.postal_code, body.state].filter(Boolean).join(' ')
-    if (!oneLine) {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Provide ZIP (and ideally city or street) to detect districts.' }) }
+
+    // Build a usable one-line address
+    const oneLine = toOneLine(body)
+
+    // If this is ZIP-only (no state/city/street), the Census endpoint often 400s.
+    // Return a 200 with empty results and a gentle note instead of bubbling a 400.
+    const zipOnly = !!oneLine && /^\d{5}(-\d{4})?$/.test(oneLine) &&
+      !body.state && !body.city && !body.line1
+    if (!oneLine || zipOnly) {
+      const note = !oneLine
+        ? 'Provide ZIP (and ideally city or street) to detect districts.'
+        : 'ZIP-only is ambiguous. Add your state or city/street for accurate district detection.'
+      const empty: GeoResult = { state: null, cd: null, sd: null, hd: null, note }
+      return { statusCode: 200, headers, body: JSON.stringify(empty) }
     }
 
     const url = new URL(CENSUS_ENDPOINT)
@@ -71,15 +86,26 @@ export const handler: Handler = async (event) => {
 
     const resp = await fetch(url.toString())
     const text = await resp.text()
+
+    // If Census returns a non-OK status, don’t fail the UI — return empty with a helpful note.
     if (!resp.ok) {
-      return { statusCode: resp.status, headers, body: JSON.stringify({ error: `Census error ${resp.status}`, details: text.slice(0, 500) }) }
+      const soft: GeoResult = {
+        state: null, cd: null, sd: null, hd: null,
+        note: `Census returned ${resp.status}. Try adding city/street with your ZIP.`,
+      }
+      return { statusCode: 200, headers, body: JSON.stringify(soft) }
     }
 
     const json = JSON.parse(text)
     const result = parseGeos(json)
     return { statusCode: 200, headers, body: JSON.stringify(result) }
   } catch (e: any) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: e?.message || 'Server error' }) }
+    // Unexpected server error — still keep the UI happy with a 200 + empty payload.
+    const soft: GeoResult = {
+      state: null, cd: null, sd: null, hd: null,
+      note: e?.message || 'Server error during geocode.',
+    }
+    return { statusCode: 200, headers, body: JSON.stringify(soft) }
   }
 }
 
