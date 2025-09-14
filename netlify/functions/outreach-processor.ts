@@ -110,7 +110,8 @@ async function getQueued(limit = 50) {
     .from('outreach_requests')
     .select(`
       id, user_id, prayer_id, target_rep_id, channels, status, subject, body,
-      representatives:target_rep_id ( id, name, office, email ),
+      representatives:target_rep_id ( id, name, office:office_name, email, contact_email, contact_form_url ),
+
       prayers:prayer_id ( content )
     `)
     .eq('status', 'queued')
@@ -129,7 +130,8 @@ async function getSingleForUser(
     .from('outreach_requests')
     .select(`
       id, user_id, prayer_id, target_rep_id, channels, status, subject, body,
-      representatives:target_rep_id ( id, name, office, email ),
+      representatives:target_rep_id ( id, name, office:office_name, email, contact_email, contact_form_url ),
+
       prayers:prayer_id ( content )
     `)
     .eq('user_id', userId)
@@ -270,7 +272,8 @@ async function sendOneRow(row: any): Promise<DispatchDetail> {
   }
 
   // 2) Resolve recipient email
-  const emails = normalizeEmails(rep.email)
+  const emails = normalizeEmails(rep.email ?? rep.email)
+
   const toEmail = emails[0] ?? null
   if (!toEmail) {
     await markFailed(row.id, 'No email on file for representative')
@@ -287,6 +290,7 @@ async function sendOneRow(row: any): Promise<DispatchDetail> {
   // 3) Compose (greeting + body/prayer)
   const subject = row.subject || 'Message from a Cyber Kingdom of Christ user'
   const greeting = greetingOnly(rep.office, (rep as any).name)
+
   const prayerText: string = row.body || row?.prayers?.content || ''
 
   // 4) Optional author metadata (for template fields + Reply-To)
