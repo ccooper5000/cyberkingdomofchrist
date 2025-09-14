@@ -2,7 +2,14 @@
 import type { Handler } from '@netlify/functions'
 
 // Census Geocoder (no key required)
-const BASE = 'https://geocoding.geo.census.gov/geocoder/geographies'
+const BASE = 'https://geocoding.geo.census.gov/geocoder'
+
+// Layer-name matcher (handles year/vintage variations)
+function pickLayer<T = any>(geos: Record<string, T[] | undefined>, includes: string[]) {
+  const keys = Object.keys(geos || {})
+  const found = keys.find(k => includes.some(s => k.toLowerCase().includes(s)))
+  return found ? geos[found] : undefined
+}
 
 type Payload = {
   line1?: string | null
@@ -19,24 +26,12 @@ type GeoResult = {
   note?: string | null
 }
 
-function parseGeos(json: any): GeoResult {
-  const match = json?.result?.addressMatches?.[0]
-  const geos = match?.geographies || {}
-  const stateCode = match?.addressComponents?.state || null
-
-  const cdName = geos['Congressional Districts']?.[0]?.NAME || null
-  let cd: string | null = null
-  if (cdName) {
-    const digits = cdName.match(/\d+/)?.[0]
-    cd = digits || 'At-Large'
-  }
-
-  const sldu = geos['State Legislative Districts - Upper']?.[0]?.NAME || null
-  const sldl = geos['State Legislative Districts - Lower']?.[0]?.NAME || null
-  const sd = sldu ? (sldu.match(/\d+/)?.[0] || null) : null
-  const hd = sldl ? (sldl.match(/\d+/)?.[0] || null) : null
-
-  return { state: stateCode || null, cd, sd, hd }
+async function fetchJSON(url: URL) {
+  const resp = await fetch(url.toString())
+  const txt = await resp.text()
+  let json: any = null
+  try { json = JSON.parse(txt) } catch {}
+  return { ok: resp.ok, status: resp.status, json, txt }
 }
 
 export const handler: Handler = async (event) => {
@@ -57,7 +52,7 @@ export const handler: Handler = async (event) => {
     const state = (body.state || '').trim()
     const zip = (body.postal_code || '').trim()
 
-    // ZIP-only is ambiguous: return a soft 200 with guidance
+    // Guard: ZIP-only is ambiguous
     const zipOnly = !!zip && !street && !city && !state
     if (!zip || zipOnly) {
       const note = !zip
@@ -67,64 +62,114 @@ export const handler: Handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify(empty) }
     }
 
-    // Prefer the structured endpoint when we have any of street/city/state
-    let resp: Response
-    let endpointUsed: 'address' | 'oneline' = 'address'
+    // ──────────────────────────────────────────────────────────────────────────
+    // 1) Get coordinates for the address (locations API)
+    // Prefer structured; fallback to oneline.
+    // ──────────────────────────────────────────────────────────────────────────
+    let loc: any | null = null
 
-    if (street || city || state) {
-      const url = new URL(`${BASE}/address`)
-      if (street) url.searchParams.set('street', street)
-      if (city) url.searchParams.set('city', city)
-      if (state) url.searchParams.set('state', state)
-      if (zip) url.searchParams.set('zip', zip)
-      url.searchParams.set('benchmark', 'Public_AR_Current')
-      url.searchParams.set('vintage', 'Current_Current')
-      url.searchParams.set('format', 'json')
+    // Structured query
+    {
+      const u = new URL(`${BASE}/locations/address`)
+      if (street) u.searchParams.set('street', street)
+      if (city) u.searchParams.set('city', city)
+      if (state) u.searchParams.set('state', state)
+      if (zip) u.searchParams.set('zip', zip)
+      u.searchParams.set('benchmark', 'Public_AR_Current')
+      u.searchParams.set('format', 'json')
 
-      resp = await fetch(url.toString())
-      if (!resp.ok) {
-        // Fallback to oneline if structured failed (some quirky addresses)
-        endpointUsed = 'oneline'
-        const u2 = new URL(`${BASE}/onelineaddress`)
-        u2.searchParams.set('address', [street, city, state, zip].filter(Boolean).join(', '))
-        u2.searchParams.set('benchmark', 'Public_AR_Current')
-        u2.searchParams.set('vintage', 'Current_Current')
-        u2.searchParams.set('format', 'json')
-        resp = await fetch(u2.toString())
+      const { ok, json } = await fetchJSON(u)
+      const matches = json?.result?.addressMatches
+      if (ok && Array.isArray(matches) && matches.length > 0) {
+        loc = matches[0]
       }
-    } else {
-      // Shouldn’t happen due to guard, but keep it safe
-      endpointUsed = 'oneline'
-      const u2 = new URL(`${BASE}/onelineaddress`)
-      u2.searchParams.set('address', [zip, state].filter(Boolean).join(' '))
-      u2.searchParams.set('benchmark', 'Public_AR_Current')
-      u2.searchParams.set('vintage', 'Current_Current')
-      u2.searchParams.set('format', 'json')
-      resp = await fetch(u2.toString())
     }
 
-    const text = await resp.text()
+    // Fallback: oneline
+    if (!loc) {
+      const oneline = [street, city, state, zip].filter(Boolean).join(', ')
+      const u = new URL(`${BASE}/locations/onelineaddress`)
+      u.searchParams.set('address', oneline)
+      u.searchParams.set('benchmark', 'Public_AR_Current')
+      u.searchParams.set('format', 'json')
 
-    // If Census still returns non-OK, respond softly with guidance instead of erroring
-    if (!resp.ok) {
+      const { ok, json } = await fetchJSON(u)
+      const matches = json?.result?.addressMatches
+      if (ok && Array.isArray(matches) && matches.length > 0) {
+        loc = matches[0]
+      }
+    }
+
+    if (!loc?.coordinates?.x || !loc?.coordinates?.y) {
       const soft: GeoResult = {
         state: null, cd: null, sd: null, hd: null,
-        note: `Census returned ${resp.status} via ${endpointUsed}. Try adjusting your city/street and ensure 2-letter state.`,
+        note: 'Could not geocode that address. Try adjusting city/street and ensure a 2-letter state.',
       }
       return { statusCode: 200, headers, body: JSON.stringify(soft) }
     }
 
-    const json = JSON.parse(text)
-    const result = parseGeos(json)
+    const { x, y } = loc.coordinates
 
-    // If parsing yielded nothing, include a tip so the UI shows guidance
-    if (!result.state && !result.cd && !result.sd && !result.hd) {
-      result.note = 'No districts found for that address. Try adding or correcting city/street (avoid ZIP+4).'
+    // Capture state from the geocoder’s normalized components if present
+    const matchedState: string | null =
+      (loc?.addressComponents?.state || state || null) ? String(loc?.addressComponents?.state || state).toUpperCase() : null
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // 2) Ask for geographies at those coordinates (district layers)
+    // ──────────────────────────────────────────────────────────────────────────
+    const g = new URL(`${BASE}/geographies/coordinates`)
+    g.searchParams.set('x', String(x)) // longitude
+    g.searchParams.set('y', String(y)) // latitude
+    g.searchParams.set('benchmark', 'Public_AR_Current')
+    g.searchParams.set('vintage', 'Current_Current')
+    g.searchParams.set('format', 'json')
+
+    const { ok: gOk, json: gJson } = await fetchJSON(g)
+    if (!gOk) {
+      const soft: GeoResult = {
+        state: matchedState, cd: null, sd: null, hd: null,
+        note: 'Census did not return district layers for those coordinates. Try a more precise street/city.',
+      }
+      return { statusCode: 200, headers, body: JSON.stringify(soft) }
+    }
+
+    const geos = gJson?.result?.geographies || {}
+
+    // Match layers by fuzzy key (handles year/prefix variations)
+    const cdArr   = pickLayer(geos, ['congressional district'])
+    const slduArr = pickLayer(geos, ['state legislative districts - upper', 'sldu'])
+    const sldlArr = pickLayer(geos, ['state legislative districts - lower', 'sldl'])
+
+    // Extract numbers
+    let cd: string | null = null
+    if (cdArr?.[0]?.NAME) {
+      const name = String(cdArr[0].NAME)
+      cd = name.match(/\d+/)?.[0] || 'At-Large'
+    }
+
+    let sd: string | null = null
+    if (slduArr?.[0]?.NAME) {
+      const name = String(slduArr[0].NAME)
+      sd = name.match(/\d+/)?.[0] || null
+    }
+
+    let hd: string | null = null
+    if (sldlArr?.[0]?.NAME) {
+      const name = String(sldlArr[0].NAME)
+      hd = name.match(/\d+/)?.[0] || null
+    }
+
+    const result: GeoResult = {
+      state: matchedState,
+      cd, sd, hd,
+    }
+
+    if (!cd && !sd && !hd) {
+      result.note = 'No districts found. Try removing ZIP+4 and abbreviating road types (e.g., “Rd”, “Ave”).'
     }
 
     return { statusCode: 200, headers, body: JSON.stringify(result) }
   } catch (e: any) {
-    // Unexpected server error — still keep the UI happy with a 200 + empty payload.
     const soft: GeoResult = {
       state: null, cd: null, sd: null, hd: null,
       note: e?.message || 'Server error during geocode.',
