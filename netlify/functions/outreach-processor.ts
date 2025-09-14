@@ -272,7 +272,7 @@ async function sendOneRow(row: any): Promise<DispatchDetail> {
   }
 
   // 2) Resolve recipient email
-  const emails = normalizeEmails(rep.email ?? rep.email)
+  const emails = normalizeEmails(rep.email ?? (rep as any).contact_email)
 
   const toEmail = emails[0] ?? null
   if (!toEmail) {
