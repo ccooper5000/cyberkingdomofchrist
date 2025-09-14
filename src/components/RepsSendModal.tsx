@@ -411,9 +411,11 @@ CyberKingdomOfChrist.org`;
   };
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center">
+    <div className="fixed inset-0 z-[9999] flex items-start sm:items-center justify-center overflow-y-auto p-4">
+
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white w-full max-w-2xl rounded-2xl shadow-xl p-6">
+      <div className="relative bg-white w-full max-w-2xl rounded-2xl shadow-xl p-6 mx-auto my-6 md:my-10 max-h-[min(92svh,calc(100dvh-3rem))] overflow-y-auto">
+
         <div className="flex items-start justify-between mb-4">
           <h2 className="text-xl font-semibold">Send to Representatives</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-800">✕</button>
@@ -556,7 +558,11 @@ CyberKingdomOfChrist.org`;
 
         {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
 
-        <div className="mt-6 flex justify-end gap-2">
+        <div
+  className="mt-6 sticky bottom-0 bg-white pt-4 flex justify-end gap-2"
+  style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+>
+
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={handleSend} disabled={busy || loading || reps.length === 0 || overCap || enrichBusy}>
             {busy ? 'Queuing…' : 'Send'}
