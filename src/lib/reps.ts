@@ -37,6 +37,78 @@ export function zipToState(zip: string | null | undefined): string | null {
   return null;
 }
 
+// src/lib/reps.ts  (add below zipToState)
+/** Ensure the representatives table is populated for this user's geographies. */
+async function ensureRepsSeeded(
+  state: string,
+  cd?: string | null,
+  sd?: string | null,
+  hd?: string | null
+): Promise<void> {
+  try {
+    // Minimal presence checks
+    const { data: sens } = await (supabase as any)
+      .from('representatives')
+      .select('id')
+      .eq('state', state)
+      .eq('level', 'federal')
+      .eq('chamber', 'senate');
+
+    const needFederal = !sens || sens.length < 2;
+
+    let needHouse = false;
+    if (cd && cd !== 'At-Large') {
+      const { data: house } = await (supabase as any)
+        .from('representatives')
+        .select('id')
+        .eq('state', state)
+        .eq('level', 'federal')
+        .eq('chamber', 'house')
+        .eq('district', String(cd));
+      needHouse = !house || house.length === 0;
+    }
+
+    let needState = false;
+    if (sd || hd) {
+      const checks: Promise<any>[] = [];
+      if (sd) {
+        checks.push(
+          (supabase as any).from('representatives').select('id')
+            .eq('state', state).eq('level', 'state').eq('chamber', 'senate').eq('district', String(sd))
+        );
+      }
+      if (hd) {
+        checks.push(
+          (supabase as any).from('representatives').select('id')
+            .eq('state', state).eq('level', 'state').eq('chamber', 'house').eq('district', String(hd))
+        );
+      }
+      const results = await Promise.all(checks);
+      needState = results.some(r => !r?.data || r.data.length === 0);
+    }
+
+    // Seed federal (senators + optional House district)
+    if (needFederal || needHouse) {
+      const qs = new URLSearchParams({ state });
+      if (cd && cd !== 'At-Large') qs.set('house_district', String(cd));
+      await fetch(`/.netlify/functions/reps-sync?${qs.toString()}`);
+      // reps-sync upserts by stable person id, so repeated runs just refresh data.
+    }
+
+    // Seed state legislators (if we know sd/hd)
+    if (sd || hd) {
+      const qs2 = new URLSearchParams({ state });
+      if (sd) qs2.set('sd', String(sd));
+      if (hd) qs2.set('hd', String(hd));
+      await fetch(`/.netlify/functions/state-reps-sync?${qs2.toString()}`);
+    }
+  } catch {
+    // Best-effort: if seeding fails, the rest of assignRepsForCurrentUser will still try to map whatever exists.
+  }
+}
+
+
+
 /** Infer level from office text if DB level is missing. */
 function inferLevelFromOffice(office: string | null): UserRepInsert['level'] {
   const o = (office || '')
@@ -96,6 +168,9 @@ export async function assignRepsForCurrentUser(): Promise<{ assigned: number; st
   // require a two-letter state; rely on saved districts (no more TX-heuristic fallback)
   const state = (addr?.state || '').trim().toUpperCase() || null;
   if (!state) return { assigned: 0, state: null, message: 'No state on file; run district detection and save.' };
+  // Ensure DB has real rows for this user's geographies before mapping
+await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? null);
+
 
   const cd = addr?.cd ? String(addr.cd) : null; // U.S. House district
   const sd = addr?.sd ? String(addr.sd) : null; // State senate (upper)
