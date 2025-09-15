@@ -11,7 +11,7 @@ type RepRowDB = {
   state: string | null;
   office_name: string | null;
   level: string | null;     // 'federal' | 'state' | 'local' | null
-  chamber: string | null;   // for federal: 'senate' | 'house'; for state: 'upper' | 'lower'
+  chamber: string | null;   // federal: 'senate' | 'house'; state: 'upper' | 'senate' | 'lower' | 'house'
   district?: string | null; // numeric string like "10"
 };
 
@@ -37,7 +37,6 @@ export function zipToState(zip: string | null | undefined): string | null {
   return null;
 }
 
-// src/lib/reps.ts  (add below zipToState)
 /** Ensure the representatives table is populated for this user's geographies. */
 async function ensureRepsSeeded(
   state: string,
@@ -74,13 +73,13 @@ async function ensureRepsSeeded(
       if (sd) {
         checks.push(
           (supabase as any).from('representatives').select('id')
-            .eq('state', state).eq('level', 'state').eq('chamber', 'senate').eq('district', String(sd))
+            .eq('state', state).eq('level', 'state').in('chamber', ['upper', 'senate']).eq('district', String(sd))
         );
       }
       if (hd) {
         checks.push(
           (supabase as any).from('representatives').select('id')
-            .eq('state', state).eq('level', 'state').eq('chamber', 'house').eq('district', String(hd))
+            .eq('state', state).eq('level', 'state').in('chamber', ['lower', 'house']).eq('district', String(hd))
         );
       }
       const results = await Promise.all(checks);
@@ -92,7 +91,6 @@ async function ensureRepsSeeded(
       const qs = new URLSearchParams({ state });
       if (cd && cd !== 'At-Large') qs.set('house_district', String(cd));
       await fetch(`/.netlify/functions/reps-sync?${qs.toString()}`);
-      // reps-sync upserts by stable person id, so repeated runs just refresh data.
     }
 
     // Seed state legislators (if we know sd/hd)
@@ -106,8 +104,6 @@ async function ensureRepsSeeded(
     // Best-effort: if seeding fails, the rest of assignRepsForCurrentUser will still try to map whatever exists.
   }
 }
-
-
 
 /** Infer level from office text if DB level is missing. */
 function inferLevelFromOffice(office: string | null): UserRepInsert['level'] {
@@ -168,9 +164,9 @@ export async function assignRepsForCurrentUser(): Promise<{ assigned: number; st
   // require a two-letter state; rely on saved districts (no more TX-heuristic fallback)
   const state = (addr?.state || '').trim().toUpperCase() || null;
   if (!state) return { assigned: 0, state: null, message: 'No state on file; run district detection and save.' };
-  // Ensure DB has real rows for this user's geographies before mapping
-await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? null);
 
+  // Ensure DB has real rows for this user's geographies before mapping
+  await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? null);
 
   const cd = addr?.cd ? String(addr.cd) : null; // U.S. House district
   const sd = addr?.sd ? String(addr.sd) : null; // State senate (upper)
@@ -205,35 +201,33 @@ await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? nu
     if (data?.length) repIds.push(...data.map((r: RepRowDB) => r.id));
   }
 
-  // 3) State Senator by SD (upper)
-if (addr?.sd) {
-  const sd = String(addr.sd);
-  const { data, error } = await (supabase as any)
-    .from('representatives')
-    .select('id, state, office_name, level, chamber, district')
-    .eq('state', state)
-    .eq('level', 'state')
-    .in('chamber', ['upper', 'senate'])
-    .eq('district', sd)
-    .limit(1);
-  if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state senate).' };
-  if (data?.length) repIds.push(...data);
-}
+  // 3) State Senator by SD (upper) — STRICT chamber filter, no office-name fallback
+  if (sd) {
+    const { data, error } = await (supabase as any)
+      .from('representatives')
+      .select('id, state, office_name, level, chamber, district')
+      .eq('state', state)
+      .eq('level', 'state')
+      .in('chamber', ['upper', 'senate'])
+      .eq('district', sd)
+      .limit(1);
+    if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state senate).' };
+    if (data?.length) repIds.push(...data.map((r: RepRowDB) => r.id)); // <-- map to IDs (fixes [object Object])
+  }
 
-  // 4) State Representative by HD (lower)
-if (addr?.hd) {
-  const hd = String(addr.hd);
-  const { data, error } = await (supabase as any)
-    .from('representatives')
-    .select('id, state, office_name, level, chamber, district')
-    .eq('state', state)
-    .eq('level', 'state')
-    .in('chamber', ['lower', 'house'])
-    .eq('district', hd)
-    .limit(1);
-  if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state house).' };
-  if (data?.length) repIds.push(...data);
-}
+  // 4) State Representative by HD (lower) — STRICT chamber filter, no office-name fallback
+  if (hd) {
+    const { data, error } = await (supabase as any)
+      .from('representatives')
+      .select('id, state, office_name, level, chamber, district')
+      .eq('state', state)
+      .eq('level', 'state')
+      .in('chamber', ['lower', 'house'])
+      .eq('district', hd)
+      .limit(1);
+    if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state house).' };
+    if (data?.length) repIds.push(...data.map((r: RepRowDB) => r.id)); // <-- map to IDs (fixes [object Object])
+  }
 
   // Require at least one match; DO NOT fall back to "all state reps" (avoids showing sample/irrelevant officials)
   const uniqueIds = Array.from(new Set(repIds));
@@ -248,7 +242,6 @@ if (addr?.hd) {
     .eq('user_id', userId);
   if (delErr) {
     // If RLS blocks delete, we can still proceed with upsert-only, but the UI may show stale reps.
-    // Report but continue so we at least insert the correct set.
     console.warn('user_representatives delete failed:', delErr.message);
   }
 
