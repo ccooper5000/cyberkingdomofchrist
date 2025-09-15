@@ -137,7 +137,7 @@ function inferLevelFromOffice(office: string | null): UserRepInsert['level'] {
     o.includes('state representative') || o.includes('state house') ||
     o.includes('state assembly') || o.includes('general assembly') ||
     o.includes('legislature') ||
-    o.includes('texas senate') || o.includes('state senate')
+    o.includes('texas senate') || o.includes('texas house')
   ) {
     return 'state';
   }

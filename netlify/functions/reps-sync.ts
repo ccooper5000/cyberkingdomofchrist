@@ -1,18 +1,32 @@
-// netlify/functions/reps-sync.ts
+// netlify/functions/state-reps-sync.ts
 import type { Handler } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
-// ── Env ───────────────────────────────────────────────────────────────────────
+/**
+ * Seeds state-level legislators (one State Senator by SD, one State Representative by HD)
+ * via the OpenStates API.
+ *
+ * Env:
+ *  - SUPABASE_URL
+ *  - SUPABASE_SERVICE_ROLE_KEY
+ *  - OPENSTATES_API_KEY
+ *
+ * Usage:
+ *  GET /.netlify/functions/state-reps-sync?state=TX&sd=26&hd=120
+ *     state: 2-letter USPS code
+ *     sd: state senate district (upper)  e.g., "26"
+ *     hd: state house district (lower)   e.g., "120"
+ */
+
 const SUPABASE_URL = process.env.SUPABASE_URL as string;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
-const CONGRESS_API_KEY = process.env.CONGRESS_API_KEY as string;
+const OPENSTATES_API_KEY = process.env.OPENSTATES_API_KEY as string;
 
 const supabase =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
     : null;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 const H = {
   'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
@@ -20,29 +34,28 @@ const H = {
 };
 const J = (o: any) => JSON.stringify(o);
 
-const STATE_NAME_TO_CODE: Record<string, string> = {
-  Alabama:'AL', Alaska:'AK', Arizona:'AZ', Arkansas:'AR', California:'CA', Colorado:'CO', Connecticut:'CT',
-  Delaware:'DE', 'District of Columbia':'DC', Florida:'FL', Georgia:'GA', Hawaii:'HI', Idaho:'ID', Illinois:'IL',
-  Indiana:'IN', Iowa:'IA', Kansas:'KS', Kentucky:'KY', Louisiana:'LA', Maine:'ME', Maryland:'MD', Massachusetts:'MA',
-  Michigan:'MI', Minnesota:'MN', Mississippi:'MS', Missouri:'MO', Montana:'MT', Nebraska:'NE', Nevada:'NV',
-  'New Hampshire':'NH', 'New Jersey':'NJ', 'New Mexico':'NM', 'New York':'NY', 'North Carolina':'NC',
-  'North Dakota':'ND', Ohio:'OH', Oklahoma:'OK', Oregon:'OR', Pennsylvania:'PA', 'Rhode Island':'RI',
-  'South Carolina':'SC', 'South Dakota':'SD', Tennessee:'TN', Texas:'TX', Utah:'UT', Vermont:'VT',
-  Virginia:'VA', Washington:'WA', 'West Virginia':'WV', Wisconsin:'WI', Wyoming:'WY', 'Puerto Rico':'PR'
+const STATE_CODE_TO_NAME: Record<string, string> = {
+  AL:'Alabama', AK:'Alaska', AZ:'Arizona', AR:'Arkansas', CA:'California', CO:'Colorado', CT:'Connecticut',
+  DE:'Delaware', DC:'District of Columbia', FL:'Florida', GA:'Georgia', HI:'Hawaii', ID:'Idaho', IL:'Illinois',
+  IN:'Indiana', IA:'Iowa', KS:'Kansas', KY:'Kentucky', LA:'Louisiana', ME:'Maine', MD:'Maryland', MA:'Massachusetts',
+  MI:'Michigan', MN:'Minnesota', MS:'Mississippi', MO:'Missouri', MT:'Montana', NE:'Nebraska', NV:'Nevada',
+  NH:'New Hampshire', NJ:'New Jersey', NM:'New Mexico', NY:'New York', NC:'North Carolina',
+  ND:'North Dakota', OH:'Ohio', OK:'Oklahoma', OR:'Oregon', PA:'Pennsylvania', RI:'Rhode Island',
+  SC:'South Carolina', SD:'South Dakota', TN:'Tennessee', TX:'Texas', UT:'Utah', VT:'Vermont',
+  VA:'Virginia', WA:'Washington', WV:'West Virginia', WI:'Wisconsin', WY:'Wyoming', PR:'Puerto Rico'
 };
 
-const toUSPS = (s: string) => {
-  if (!s) return null;
-  const t = s.trim();
-  if (/^[A-Za-z]{2}$/.test(t)) return t.toUpperCase();
-  return STATE_NAME_TO_CODE[t] || null;
-};
+const stateName = (code: string) => STATE_CODE_TO_NAME[code] || code;
+const stateDiv = (state: string) => `ocd-division/country:us/state:${state.toLowerCase()}`;
+const slduDiv = (state: string, sd: string) => `${stateDiv(state)}/sldu:${String(sd).trim()}`;
+const sldlDiv = (state: string, hd: string) => `${stateDiv(state)}/sldl:${String(hd).trim()}`;
 
-const apiURL = (path: string, params: Record<string,string|number|boolean|undefined>) => {
-  const u = new URL(`https://api.congress.gov/v3/${path}`);
+const apiURL = (params: Record<string,string|number|undefined>) => {
+  const u = new URL('https://v3.openstates.org/people');
   for (const [k,v] of Object.entries(params)) if (v !== undefined) u.searchParams.set(k, String(v));
-  u.searchParams.set('api_key', CONGRESS_API_KEY);   // ← sent to API only
-  u.searchParams.set('format', 'json');
+  u.searchParams.set('apikey', OPENSTATES_API_KEY);
+  // We ask for small page sizes; there should be only 1 match for a single district
+  u.searchParams.set('per_page', '5');
   return u.toString();
 };
 
@@ -56,60 +69,22 @@ const fetchJSON = async (url: string) => {
 };
 
 const pick = (...vals: any[]) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return null; };
+const fullName = (p: any) => String(p.name || `${pick(p.given_name, p.givenName, '')} ${pick(p.family_name, p.familyName, '')}` || '').trim();
 
-const currentTermOf = (m: any) => {
-  const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
-  return terms.find(t => (t.current === true) || (t.endYear == null)) || null;
-};
-
-const memberDistrict = (m: any): string | null => {
-  const cur = currentTermOf(m);
-  const d = pick(m.district, m.cd, m.congressionalDistrict, m.currentDistrict, cur?.district);
-  if (d === 0 || d === '0') return 'At-Large';
-  return d != null ? String(d) : null;
-};
-
-const memberStateCode = (m: any): string | null => {
-  const cur = currentTermOf(m);
-  const s = pick(
-    m.stateCode, m.state, m.stateAbbrev, m.state_abbrev, m.state_abbr,
-    m.state_name, m.stateName, m.address?.state, cur?.stateCode, cur?.state
-  );
-  return s ? String(s).toUpperCase() : null;
-};
-
-const detectChamber = (m: any): 'senate'|'house'|null => {
-  const cur = currentTermOf(m);
-  const explicit = String(pick(cur?.chamber, m.chamber, m.chamberName, m.role) || '').toLowerCase();
-  if (explicit.includes('sen')) return 'senate';
-  if (explicit.includes('house') || explicit.includes('rep')) return 'house';
-  const d = memberDistrict(m);
-  return d == null ? 'senate' : 'house';
-};
-
-const memberName = (m: any): string =>
-  (pick(m.name, `${pick(m.firstName, m.first_name, '')} ${pick(m.lastName, m.last_name, '')}`) || '').toString().trim();
-
-const stateDivisionId = (state: string) => `ocd-division/country:us/state:${state.toLowerCase()}`;
-const normalizeCd = (district: string) => {
-  const s = String(district).trim().toLowerCase();
-  if (s === 'at-large' || s === 'at large' || s === 'atlarge') return '1';
-  const m = s.match(/\d+/);
-  return m ? m[0] : '1';
-};
-const houseDivisionId = (state: string, district: string) =>
-  `ocd-division/country:us/state:${state.toLowerCase()}/cd:${normalizeCd(district)}`;
-
-async function clearFederalSlot(state: string, chamber: 'senate'|'house', district?: string | null) {
-  if (chamber === 'senate') {
-    await supabase!.from('representatives').delete().eq('level','federal').eq('chamber','senate').eq('state', state);
-  } else {
-    await supabase!.from('representatives').delete()
-      .eq('level','federal').eq('chamber','house').eq('state', state).eq('district', district ?? null);
-  }
+async function clearSlot(state: string, chamber: 'senate'|'house', district: string) {
+  await supabase!.from('representatives')
+    .delete()
+    .eq('level', 'state')
+    .eq('state', state)
+    .eq('chamber', chamber)
+    .eq('district', district);
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
+async function insertOne(row: any) {
+  const { error } = await supabase!.from('representatives').insert([row]);
+  if (error) throw new Error(`Supabase insert failed: ${error.message}`);
+}
+
 export const handler: Handler = async (event) => {
   try {
     if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: H, body: '' };
@@ -119,96 +94,74 @@ export const handler: Handler = async (event) => {
     if (!supabase) miss.push('Supabase init');
     if (!SUPABASE_URL) miss.push('SUPABASE_URL');
     if (!SUPABASE_SERVICE_ROLE_KEY) miss.push('SUPABASE_SERVICE_ROLE_KEY');
-    if (!CONGRESS_API_KEY) miss.push('CONGRESS_API_KEY');
+    if (!OPENSTATES_API_KEY) miss.push('OPENSTATES_API_KEY');
     if (miss.length) return { statusCode: 500, headers: H, body: J({ error: `Missing env: ${miss.join(', ')}` }) };
 
     const qs = event.queryStringParameters || {};
-    const stateRaw = (qs.state ?? '').toString();
-    const state = toUSPS(stateRaw);
-    const districtRaw = (qs.house_district ?? '').toString().trim();
-    if (!state) return { statusCode: 400, headers: H, body: J({ error: 'Provide ?state=TX (or full state name)' }) };
+    const state = String(qs.state || '').toUpperCase();
+    const sd = String(qs.sd || '').trim() || undefined;
+    const hd = String(qs.hd || '').trim() || undefined;
 
-    // Use PATH endpoints that officially filter by state/district
-    // Ref examples: /v3/member/{stateCode} and /v3/member/{stateCode}/{district} (see MS connector docs). :contentReference[oaicite:0]{index=0}
-    // Also note Congress.gov announced member filtering by state/district/current. :contentReference[oaicite:1]{index=1}
-
-    // 1) Senators for the state
-    const urlSen = apiURL(`member/${state}`, { currentMember: true, limit: 250 });
-    const jsSen = await fetchJSON(urlSen);
-    const listSen: any[] = (jsSen?.members ?? jsSen?.data?.members ?? jsSen?.results ?? []);
-
-    // Hard filter to the state and chamber=senate
-    const txOnly = listSen.filter(m => memberStateCode(m) === state);
-    const txSenators = txOnly.filter(m => detectChamber(m) === 'senate');
-
-    await clearFederalSlot(state, 'senate');
-    let seededSen = 0;
-    if (txSenators.length) {
-      const rows = txSenators.map(m => ({
-        level: 'federal',
-        chamber: 'senate',
-        state,
-        district: null,
-        division_id: stateDivisionId(state),
-        name: memberName(m),
-        office_name: 'U.S. Senator',
-        email: null,
-        contact_email: null,
-        contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
-      }));
-      const { error } = await supabase!.from('representatives').insert(rows);
-      if (error) throw new Error(`Supabase insert (senate) failed: ${error.message}`);
-      seededSen = rows.length;
+    if (!/^[A-Z]{2}$/.test(state)) {
+      return { statusCode: 400, headers: H, body: J({ error: 'Provide ?state=XX (two-letter code)' }) };
     }
 
-    // 2) House member for the district (if provided)
-    let seededHouse = 0;
-    let houseCandidates: any[] = [];
-    if (districtRaw) {
-      const district = districtRaw.toLowerCase() === 'at-large' ? 'At-Large' : districtRaw;
-      const urlHouse = apiURL(`member/${state}/${district}`, { currentMember: true, limit: 50 });
-      const jsHouse = await fetchJSON(urlHouse);
-      const listH: any[] = (jsHouse?.members ?? jsHouse?.data?.members ?? jsHouse?.results ?? []);
+    const jurisdiction = stateName(state);
 
-      houseCandidates = listH
-        .filter(m => (memberStateCode(m) ?? state) === state)
-        .filter(m => (memberDistrict(m) ?? district) === district)
-        .filter(m => detectChamber(m) === 'house');
-
-      await clearFederalSlot(state, 'house', district);
-      if (houseCandidates.length) {
-        const rows = houseCandidates.map(m => ({
-          level: 'federal',
-          chamber: 'house',
+    // ── 1) State Senator (upper / SD) ───────────────────────────────────────
+    let seededSD = 0;
+    if (sd) {
+      // OpenStates people search for upper chamber district
+      const urlUpper = apiURL({ jurisdiction, chamber: 'upper', district: sd });
+      const jsU = await fetchJSON(urlUpper);
+      const peopleU: any[] = (jsU?.results ?? jsU?.data ?? jsU?.people ?? jsU?.items ?? []);
+      const personU = peopleU[0]; // there should be exactly one
+      await clearSlot(state, 'senate', sd);
+      if (personU) {
+        const row = {
+          level: 'state',
+          chamber: 'senate',
           state,
-          district: memberDistrict(m) ?? district,
-          division_id: houseDivisionId(state, memberDistrict(m) ?? district),
-          name: memberName(m),
-          office_name: 'U.S. Representative',
-          email: null,
+          district: sd,
+          division_id: slduDiv(state, sd),
+          name: fullName(personU),
+          office_name: 'State Senator',
+          email: pick(personU.email, personU.primary_email) || null,
           contact_email: null,
-          contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
-        }));
-        const { error } = await supabase!.from('representatives').insert(rows);
-        if (error) throw new Error(`Supabase insert (house) failed: ${error.message}`);
-        seededHouse = rows.length;
+          contact_form_url: pick(personU.url, personU.website, personU.links?.[0]?.url) || null,
+        };
+        await insertOne(row);
+        seededSD = 1;
       }
     }
 
-    // Privacy-safe debug (NO URLs, NO KEYS)
-    return {
-      statusCode: 200,
-      headers: H,
-      body: J({
-        ok: true,
-        debug: {
+    // ── 2) State Representative (lower / HD) ────────────────────────────────
+    let seededHD = 0;
+    if (hd) {
+      const urlLower = apiURL({ jurisdiction, chamber: 'lower', district: hd });
+      const jsL = await fetchJSON(urlLower);
+      const peopleL: any[] = (jsL?.results ?? jsL?.data ?? jsL?.people ?? jsL?.items ?? []);
+      const personL = peopleL[0];
+      await clearSlot(state, 'house', hd);
+      if (personL) {
+        const row = {
+          level: 'state',
+          chamber: 'house',
           state,
-          senatorsDetected: seededSen,
-          houseDistrict: districtRaw || null,
-          houseDetected: seededHouse
-        }
-      })
-    };
+          district: hd,
+          division_id: sldlDiv(state, hd),
+          name: fullName(personL),
+          office_name: 'State Representative',
+          email: pick(personL.email, personL.primary_email) || null,
+          contact_email: null,
+          contact_form_url: pick(personL.url, personL.website, personL.links?.[0]?.url) || null,
+        };
+        await insertOne(row);
+        seededHD = 1;
+      }
+    }
+
+    return { statusCode: 200, headers: H, body: J({ ok: true, seeded: { senate: seededSD, house: seededHD } }) };
   } catch (e: any) {
     return { statusCode: 500, headers: H, body: J({ error: e?.message || 'Server error' }) };
   }
