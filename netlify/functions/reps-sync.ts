@@ -62,32 +62,40 @@ const pick = (...vals: any[]) => {
   return null;
 };
 
-// Chamber detection prefers a current term record
-const detectChamber = (m: any): 'senate'|'house'|null => {
-  const terms: any[] = (m.terms ?? []);
-  const currentTerm = terms.find(t => (t.current === true) || (t.endYear == null));
-  const cands = [
-    pick(currentTerm?.chamber),
-    pick(m.chamber, m.chamberName, m.role),
-  ];
-  const c = String(pick(...cands) || '').toLowerCase();
-  if (c.includes('sen')) return 'senate';
-  if (c.includes('house') || c.includes('rep')) return 'house';
-  return null;
+const memberName = (m: any): string => {
+  return (pick(m.name, `${pick(m.firstName, m.first_name, '')} ${pick(m.lastName, m.last_name, '')}`) || '')
+    .toString().trim();
 };
 
+// Try many possible fields for “district”
 const memberDistrict = (m: any): string | null => {
-  // House district might be on the member or the current term
-  const terms: any[] = (m.terms ?? []);
+  const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
   const currentTerm = terms.find(t => (t.current === true) || (t.endYear == null));
-  const d = pick(m.district, currentTerm?.district);
+  const d = pick(
+    m.district,
+    m.cd,
+    m.congressionalDistrict,
+    m.currentDistrict,
+    currentTerm?.district
+  );
   if (d === 0 || d === '0') return 'At-Large';
   return d != null ? String(d) : null;
 };
 
-const memberName = (m: any): string => {
-  return (pick(m.name, `${pick(m.firstName, m.first_name, '')} ${pick(m.lastName, m.last_name, '')}`) || '')
-    .toString().trim();
+// Chamber detection: prefer explicit, else infer by district nullability
+const detectChamber = (m: any): 'senate'|'house'|null => {
+  const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
+  const currentTerm = terms.find(t => (t.current === true) || (t.endYear == null));
+  const explicit = String(pick(
+    currentTerm?.chamber,
+    m.chamber, m.chamberName, m.role
+  ) || '').toLowerCase();
+  if (explicit.includes('sen')) return 'senate';
+  if (explicit.includes('house') || explicit.includes('rep')) return 'house';
+  // Fallback: no district => senator; district present => house
+  const d = memberDistrict(m);
+  if (d == null) return 'senate';
+  return 'house';
 };
 
 // Idempotent cleanup (by slot), then insert
@@ -135,12 +143,14 @@ export const handler: Handler = async (event) => {
     // 1) Senators — query-style endpoint: member?state=XX&currentMember=true
     const urlSen = qurl('member', { state, currentMember: true, limit: 250 });
     const jsSen = await jsonFetch(urlSen);
-    const membersSen: any[] = (jsSen?.members ?? jsSen?.data?.members ?? jsSen?.results ?? []);
-    const senCandidates = membersSen.filter(m => detectChamber(m) === 'senate');
+    const membersAll: any[] = (jsSen?.members ?? jsSen?.data?.members ?? jsSen?.results ?? []);
+    const senators = membersAll.filter(m => detectChamber(m) === 'senate');
+
     await clearFederalSlot(state, 'senate');
+
     let seededSen = 0;
-    if (senCandidates.length) {
-      const rows = senCandidates.map(m => ({
+    if (senators.length) {
+      const rows = senators.map(m => ({
         level: 'federal',
         chamber: 'senate',
         state,
@@ -149,14 +159,14 @@ export const handler: Handler = async (event) => {
         office_name: 'U.S. Senator',
         email: null,
         contact_email: null,
-        contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website) || null,
+        contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
       }));
       const { error } = await supabase!.from('representatives').insert(rows);
       if (error) throw new Error(`Supabase insert (senate) failed: ${error.message}`);
       seededSen = rows.length;
     }
 
-    // 2) House — if district provided, call: member?state=XX&district=YY&currentMember=true
+    // 2) House — if district provided, query: member?state=XX&district=YY&currentMember=true
     let seededHouse = 0;
     let houseCandidates: any[] = [];
     if (districtRaw) {
@@ -176,7 +186,7 @@ export const handler: Handler = async (event) => {
           office_name: 'U.S. Representative',
           email: null,
           contact_email: null,
-          contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website) || null,
+          contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
         }));
         const { error } = await supabase!.from('representatives').insert(rows);
         if (error) throw new Error(`Supabase insert (house) failed: ${error.message}`);
@@ -184,15 +194,15 @@ export const handler: Handler = async (event) => {
       }
     }
 
-    // Debug payload to make browser Network → Response useful
+    // Debug payload to make Network → Response useful
     const debug = {
       state,
       senQuery: urlSen,
-      senFound: membersSen.length,
-      senPicked: seededSen,
+      totalMembersFetched: membersAll.length,
+      senatorsDetected: senators.length,
       houseDistrict: districtRaw || null,
-      houseFound: houseCandidates.length,
-      housePicked: seededHouse,
+      houseCandidatesDetected: houseCandidates.length,
+      inserted: { senate: seededSen, house: seededHouse }
     };
 
     return { statusCode: 200, headers: headersCommon, body: J({ ok: true, debug }) };
