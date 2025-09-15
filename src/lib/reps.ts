@@ -212,8 +212,8 @@ await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? nu
       .select('id, state, office_name, level, chamber, district')
       .eq('state', state)
       .eq('level', 'state')
-      // support both schema styles: 'upper' OR title contains 'senate'
-      .or('chamber.eq.upper,office_name.ilike.%senate%')
+      .or("chamber.eq.upper,chamber.eq.senate,office_name.ilike.%senate%,office_name.ilike.%senator%")
+
       .eq('district', sd)
       .limit(5);
     if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state senate).' };
@@ -227,8 +227,7 @@ await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? nu
       .select('id, state, office_name, level, chamber, district')
       .eq('state', state)
       .eq('level', 'state')
-      // support both schema styles: 'lower' OR title contains 'representative'
-      .or('chamber.eq.lower,office_name.ilike.%representative%')
+      .or("chamber.eq.lower,chamber.eq.house,office_name.ilike.%representative%,office_name.ilike.%assembly%")
       .eq('district', hd)
       .limit(5);
     if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state house).' };
