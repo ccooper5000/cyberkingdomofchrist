@@ -56,7 +56,6 @@ const jsonFetch = async (url: string) => {
   return r.json();
 };
 
-// Robust field picking (schema drift tolerant)
 const pick = (...vals: any[]) => {
   for (const v of vals) if (v !== undefined && v !== null && v !== '') return v;
   return null;
@@ -82,7 +81,6 @@ const memberDistrict = (m: any): string | null => {
   return d != null ? String(d) : null;
 };
 
-// Chamber detection: prefer explicit, else infer by district nullability
 const detectChamber = (m: any): 'senate'|'house'|null => {
   const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
   const currentTerm = terms.find(t => (t.current === true) || (t.endYear == null));
@@ -97,6 +95,20 @@ const detectChamber = (m: any): 'senate'|'house'|null => {
   if (d == null) return 'senate';
   return 'house';
 };
+
+// ----- division_id helpers (OCD-style) -----
+const stateDivisionId = (state: string) =>
+  `ocd-division/country:us/state:${state.toLowerCase()}`;
+
+const normalizeCd = (district: string) => {
+  const s = String(district).trim().toLowerCase();
+  if (s === 'at-large' || s === 'at large' || s === 'atlarge') return '1';
+  const m = s.match(/\d+/);
+  return m ? m[0] : '1';
+};
+
+const houseDivisionId = (state: string, district: string) =>
+  `ocd-division/country:us/state:${state.toLowerCase()}/cd:${normalizeCd(district)}`;
 
 // Idempotent cleanup (by slot), then insert
 async function clearFederalSlot(state: string, chamber: 'senate'|'house', district?: string | null) {
@@ -155,6 +167,7 @@ export const handler: Handler = async (event) => {
         chamber: 'senate',
         state,
         district: null,
+        division_id: stateDivisionId(state),            // ← REQUIRED (NOT NULL) ✅
         name: memberName(m),
         office_name: 'U.S. Senator',
         email: null,
@@ -182,6 +195,7 @@ export const handler: Handler = async (event) => {
           chamber: 'house',
           state,
           district: memberDistrict(m) ?? district,
+          division_id: houseDivisionId(state, memberDistrict(m) ?? district), // ← REQUIRED (NOT NULL) ✅
           name: memberName(m),
           office_name: 'U.S. Representative',
           email: null,
