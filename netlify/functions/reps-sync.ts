@@ -66,31 +66,35 @@ const memberName = (m: any): string => {
     .toString().trim();
 };
 
-// Try many possible fields for “district”
-const memberDistrict = (m: any): string | null => {
+// Try many possible fields for “district” and “state” (schema drift tolerant)
+const currentTermOf = (m: any) => {
   const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
-  const currentTerm = terms.find(t => (t.current === true) || (t.endYear == null));
-  const d = pick(
-    m.district,
-    m.cd,
-    m.congressionalDistrict,
-    m.currentDistrict,
-    currentTerm?.district
-  );
+  return terms.find(t => (t.current === true) || (t.endYear == null)) || null;
+};
+
+const memberDistrict = (m: any): string | null => {
+  const cur = currentTermOf(m);
+  const d = pick(m.district, m.cd, m.congressionalDistrict, m.currentDistrict, cur?.district);
   if (d === 0 || d === '0') return 'At-Large';
   return d != null ? String(d) : null;
 };
 
+const memberStateCode = (m: any): string | null => {
+  const cur = currentTermOf(m);
+  const s = pick(
+    m.stateCode, m.state, m.stateAbbrev, m.state_abbrev, m.state_abbr,
+    m.state_name, m.stateName, m.address?.state,
+    cur?.stateCode, cur?.state
+  );
+  return s ? String(s).toUpperCase() : null;
+};
+
+// Chamber detection: prefer explicit, else infer by district nullability
 const detectChamber = (m: any): 'senate'|'house'|null => {
-  const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
-  const currentTerm = terms.find(t => (t.current === true) || (t.endYear == null));
-  const explicit = String(pick(
-    currentTerm?.chamber,
-    m.chamber, m.chamberName, m.role
-  ) || '').toLowerCase();
+  const cur = currentTermOf(m);
+  const explicit = String(pick(cur?.chamber, m.chamber, m.chamberName, m.role) || '').toLowerCase();
   if (explicit.includes('sen')) return 'senate';
   if (explicit.includes('house') || explicit.includes('rep')) return 'house';
-  // Fallback: no district => senator; district present => house
   const d = memberDistrict(m);
   if (d == null) return 'senate';
   return 'house';
@@ -152,22 +156,25 @@ export const handler: Handler = async (event) => {
       return { statusCode: 400, headers: headersCommon, body: J({ error: 'Provide ?state=TX (or full state name)' }) };
     }
 
-    // 1) Senators — query-style endpoint: member?state=XX&currentMember=true
-    const urlSen = qurl('member', { state, currentMember: true, limit: 250 });
-    const jsSen = await jsonFetch(urlSen);
-    const membersAll: any[] = (jsSen?.members ?? jsSen?.data?.members ?? jsSen?.results ?? []);
-    const senators = membersAll.filter(m => detectChamber(m) === 'senate');
+    // 1) Pull members for the state, then filter to TX + current + exact chamber.
+    //    We still hit the state query (even if the API ignores it), but we *always* filter client-side by memberStateCode.
+    const urlState = qurl('member', { state, currentMember: true, limit: 250 });
+    const jsState = await jsonFetch(urlState);
+    const all: any[] = (jsState?.members ?? jsState?.data?.members ?? jsState?.results ?? []);
 
+    const forTX = all.filter(m => memberStateCode(m) === state);
+    const currentTX = forTX; // 'currentMember=true' is in the query; keep for resilience.
+
+    const txSenators = currentTX.filter(m => detectChamber(m) === 'senate');
     await clearFederalSlot(state, 'senate');
-
     let seededSen = 0;
-    if (senators.length) {
-      const rows = senators.map(m => ({
+    if (txSenators.length) {
+      const rows = txSenators.map(m => ({
         level: 'federal',
         chamber: 'senate',
         state,
         district: null,
-        division_id: stateDivisionId(state),            // ← REQUIRED (NOT NULL) ✅
+        division_id: stateDivisionId(state),
         name: memberName(m),
         office_name: 'U.S. Senator',
         email: null,
@@ -179,15 +186,20 @@ export const handler: Handler = async (event) => {
       seededSen = rows.length;
     }
 
-    // 2) House — if district provided, query: member?state=XX&district=YY&currentMember=true
+    // 2) House — if district provided, we *also* pull via /member?state=XX&district=YY&currentMember=true
+    //    and we filter client-side by state + district + chamber=house just in case.
     let seededHouse = 0;
     let houseCandidates: any[] = [];
     if (districtRaw) {
       const district = districtRaw.toLowerCase() === 'at-large' ? 'At-Large' : districtRaw;
       const urlHouse = qurl('member', { state, district, currentMember: true, limit: 50 });
       const jsHouse = await jsonFetch(urlHouse);
-      const membersHouse: any[] = (jsHouse?.members ?? jsHouse?.data?.members ?? jsHouse?.results ?? []);
-      houseCandidates = membersHouse.filter(m => detectChamber(m) === 'house');
+      const listH: any[] = (jsHouse?.members ?? jsHouse?.data?.members ?? jsHouse?.results ?? []);
+      houseCandidates = listH
+        .filter(m => memberStateCode(m) === state)
+        .filter(m => (memberDistrict(m) ?? district) === district)
+        .filter(m => detectChamber(m) === 'house');
+
       await clearFederalSlot(state, 'house', district);
       if (houseCandidates.length) {
         const rows = houseCandidates.map(m => ({
@@ -195,7 +207,7 @@ export const handler: Handler = async (event) => {
           chamber: 'house',
           state,
           district: memberDistrict(m) ?? district,
-          division_id: houseDivisionId(state, memberDistrict(m) ?? district), // ← REQUIRED (NOT NULL) ✅
+          division_id: houseDivisionId(state, memberDistrict(m) ?? district),
           name: memberName(m),
           office_name: 'U.S. Representative',
           email: null,
@@ -211,9 +223,9 @@ export const handler: Handler = async (event) => {
     // Debug payload to make Network → Response useful
     const debug = {
       state,
-      senQuery: urlSen,
-      totalMembersFetched: membersAll.length,
-      senatorsDetected: senators.length,
+      stateQuery: urlState,
+      fetched: { raw: all.length, filteredForState: forTX.length },
+      senatorsDetected: txSenators.length,
       houseDistrict: districtRaw || null,
       houseCandidatesDetected: houseCandidates.length,
       inserted: { senate: seededSen, house: seededHouse }
