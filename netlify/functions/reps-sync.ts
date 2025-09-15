@@ -12,14 +12,13 @@ const supabase =
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
     : null;
 
-const J = (o: any) => JSON.stringify(o);
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
-const headersCommon = {
+const H = {
   'Content-Type': 'application/json',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,OPTIONS',
 };
+const J = (o: any) => JSON.stringify(o);
 
 const STATE_NAME_TO_CODE: Record<string, string> = {
   Alabama:'AL', Alaska:'AK', Arizona:'AZ', Arkansas:'AR', California:'CA', Colorado:'CO', Connecticut:'CT',
@@ -39,34 +38,25 @@ const toUSPS = (s: string) => {
   return STATE_NAME_TO_CODE[t] || null;
 };
 
-const qurl = (path: string, params: Record<string,string|number|boolean|undefined>) => {
+const apiURL = (path: string, params: Record<string,string|number|boolean|undefined>) => {
   const u = new URL(`https://api.congress.gov/v3/${path}`);
   for (const [k,v] of Object.entries(params)) if (v !== undefined) u.searchParams.set(k, String(v));
-  u.searchParams.set('api_key', CONGRESS_API_KEY);
+  u.searchParams.set('api_key', CONGRESS_API_KEY);   // ← sent to API only
   u.searchParams.set('format', 'json');
   return u.toString();
 };
 
-const jsonFetch = async (url: string) => {
+const fetchJSON = async (url: string) => {
   const r = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!r.ok) {
     const t = await r.text().catch(() => '');
-    throw new Error(`HTTP ${r.status} for ${url} :: ${t.slice(0,240)}`);
+    throw new Error(`HTTP ${r.status} :: ${t.slice(0,240)}`);
   }
   return r.json();
 };
 
-const pick = (...vals: any[]) => {
-  for (const v of vals) if (v !== undefined && v !== null && v !== '') return v;
-  return null;
-};
+const pick = (...vals: any[]) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return null; };
 
-const memberName = (m: any): string => {
-  return (pick(m.name, `${pick(m.firstName, m.first_name, '')} ${pick(m.lastName, m.last_name, '')}`) || '')
-    .toString().trim();
-};
-
-// Try many possible fields for “district” and “state” (schema drift tolerant)
 const currentTermOf = (m: any) => {
   const terms: any[] = Array.isArray(m.terms) ? m.terms : [];
   return terms.find(t => (t.current === true) || (t.endYear == null)) || null;
@@ -83,89 +73,74 @@ const memberStateCode = (m: any): string | null => {
   const cur = currentTermOf(m);
   const s = pick(
     m.stateCode, m.state, m.stateAbbrev, m.state_abbrev, m.state_abbr,
-    m.state_name, m.stateName, m.address?.state,
-    cur?.stateCode, cur?.state
+    m.state_name, m.stateName, m.address?.state, cur?.stateCode, cur?.state
   );
   return s ? String(s).toUpperCase() : null;
 };
 
-// Chamber detection: prefer explicit, else infer by district nullability
 const detectChamber = (m: any): 'senate'|'house'|null => {
   const cur = currentTermOf(m);
   const explicit = String(pick(cur?.chamber, m.chamber, m.chamberName, m.role) || '').toLowerCase();
   if (explicit.includes('sen')) return 'senate';
   if (explicit.includes('house') || explicit.includes('rep')) return 'house';
   const d = memberDistrict(m);
-  if (d == null) return 'senate';
-  return 'house';
+  return d == null ? 'senate' : 'house';
 };
 
-// ----- division_id helpers (OCD-style) -----
-const stateDivisionId = (state: string) =>
-  `ocd-division/country:us/state:${state.toLowerCase()}`;
+const memberName = (m: any): string =>
+  (pick(m.name, `${pick(m.firstName, m.first_name, '')} ${pick(m.lastName, m.last_name, '')}`) || '').toString().trim();
 
+const stateDivisionId = (state: string) => `ocd-division/country:us/state:${state.toLowerCase()}`;
 const normalizeCd = (district: string) => {
   const s = String(district).trim().toLowerCase();
   if (s === 'at-large' || s === 'at large' || s === 'atlarge') return '1';
   const m = s.match(/\d+/);
   return m ? m[0] : '1';
 };
-
 const houseDivisionId = (state: string, district: string) =>
   `ocd-division/country:us/state:${state.toLowerCase()}/cd:${normalizeCd(district)}`;
 
-// Idempotent cleanup (by slot), then insert
 async function clearFederalSlot(state: string, chamber: 'senate'|'house', district?: string | null) {
   if (chamber === 'senate') {
-    await supabase!.from('representatives')
-      .delete()
-      .eq('level','federal')
-      .eq('chamber','senate')
-      .eq('state', state);
+    await supabase!.from('representatives').delete().eq('level','federal').eq('chamber','senate').eq('state', state);
   } else {
-    await supabase!.from('representatives')
-      .delete()
-      .eq('level','federal')
-      .eq('chamber','house')
-      .eq('state', state)
-      .eq('district', district ?? null);
+    await supabase!.from('representatives').delete()
+      .eq('level','federal').eq('chamber','house').eq('state', state).eq('district', district ?? null);
   }
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 export const handler: Handler = async (event) => {
   try {
-    if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: headersCommon, body: '' };
-    if (event.httpMethod !== 'GET') {
-      return { statusCode: 405, headers: headersCommon, body: J({ error: 'Use GET' }) };
-    }
+    if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: H, body: '' };
+    if (event.httpMethod !== 'GET') return { statusCode: 405, headers: H, body: J({ error: 'Use GET' }) };
+
     const miss: string[] = [];
     if (!supabase) miss.push('Supabase init');
     if (!SUPABASE_URL) miss.push('SUPABASE_URL');
     if (!SUPABASE_SERVICE_ROLE_KEY) miss.push('SUPABASE_SERVICE_ROLE_KEY');
     if (!CONGRESS_API_KEY) miss.push('CONGRESS_API_KEY');
-    if (miss.length) {
-      return { statusCode: 500, headers: headersCommon, body: J({ error: `Missing env: ${miss.join(', ')}` }) };
-    }
+    if (miss.length) return { statusCode: 500, headers: H, body: J({ error: `Missing env: ${miss.join(', ')}` }) };
 
     const qs = event.queryStringParameters || {};
     const stateRaw = (qs.state ?? '').toString();
     const state = toUSPS(stateRaw);
     const districtRaw = (qs.house_district ?? '').toString().trim();
-    if (!state) {
-      return { statusCode: 400, headers: headersCommon, body: J({ error: 'Provide ?state=TX (or full state name)' }) };
-    }
+    if (!state) return { statusCode: 400, headers: H, body: J({ error: 'Provide ?state=TX (or full state name)' }) };
 
-    // 1) Pull members for the state, then filter to TX + current + exact chamber.
-    //    We still hit the state query (even if the API ignores it), but we *always* filter client-side by memberStateCode.
-    const urlState = qurl('member', { state, currentMember: true, limit: 250 });
-    const jsState = await jsonFetch(urlState);
-    const all: any[] = (jsState?.members ?? jsState?.data?.members ?? jsState?.results ?? []);
+    // Use PATH endpoints that officially filter by state/district
+    // Ref examples: /v3/member/{stateCode} and /v3/member/{stateCode}/{district} (see MS connector docs). :contentReference[oaicite:0]{index=0}
+    // Also note Congress.gov announced member filtering by state/district/current. :contentReference[oaicite:1]{index=1}
 
-    const forTX = all.filter(m => memberStateCode(m) === state);
-    const currentTX = forTX; // 'currentMember=true' is in the query; keep for resilience.
+    // 1) Senators for the state
+    const urlSen = apiURL(`member/${state}`, { currentMember: true, limit: 250 });
+    const jsSen = await fetchJSON(urlSen);
+    const listSen: any[] = (jsSen?.members ?? jsSen?.data?.members ?? jsSen?.results ?? []);
 
-    const txSenators = currentTX.filter(m => detectChamber(m) === 'senate');
+    // Hard filter to the state and chamber=senate
+    const txOnly = listSen.filter(m => memberStateCode(m) === state);
+    const txSenators = txOnly.filter(m => detectChamber(m) === 'senate');
+
     await clearFederalSlot(state, 'senate');
     let seededSen = 0;
     if (txSenators.length) {
@@ -186,17 +161,17 @@ export const handler: Handler = async (event) => {
       seededSen = rows.length;
     }
 
-    // 2) House — if district provided, we *also* pull via /member?state=XX&district=YY&currentMember=true
-    //    and we filter client-side by state + district + chamber=house just in case.
+    // 2) House member for the district (if provided)
     let seededHouse = 0;
     let houseCandidates: any[] = [];
     if (districtRaw) {
       const district = districtRaw.toLowerCase() === 'at-large' ? 'At-Large' : districtRaw;
-      const urlHouse = qurl('member', { state, district, currentMember: true, limit: 50 });
-      const jsHouse = await jsonFetch(urlHouse);
+      const urlHouse = apiURL(`member/${state}/${district}`, { currentMember: true, limit: 50 });
+      const jsHouse = await fetchJSON(urlHouse);
       const listH: any[] = (jsHouse?.members ?? jsHouse?.data?.members ?? jsHouse?.results ?? []);
+
       houseCandidates = listH
-        .filter(m => memberStateCode(m) === state)
+        .filter(m => (memberStateCode(m) ?? state) === state)
         .filter(m => (memberDistrict(m) ?? district) === district)
         .filter(m => detectChamber(m) === 'house');
 
@@ -220,20 +195,22 @@ export const handler: Handler = async (event) => {
       }
     }
 
-    // Debug payload to make Network → Response useful
-    const debug = {
-      state,
-      stateQuery: urlState,
-      fetched: { raw: all.length, filteredForState: forTX.length },
-      senatorsDetected: txSenators.length,
-      houseDistrict: districtRaw || null,
-      houseCandidatesDetected: houseCandidates.length,
-      inserted: { senate: seededSen, house: seededHouse }
+    // Privacy-safe debug (NO URLs, NO KEYS)
+    return {
+      statusCode: 200,
+      headers: H,
+      body: J({
+        ok: true,
+        debug: {
+          state,
+          senatorsDetected: seededSen,
+          houseDistrict: districtRaw || null,
+          houseDetected: seededHouse
+        }
+      })
     };
-
-    return { statusCode: 200, headers: headersCommon, body: J({ ok: true, debug }) };
   } catch (e: any) {
-    return { statusCode: 500, headers: headersCommon, body: J({ error: e?.message || 'Server error' }) };
+    return { statusCode: 500, headers: H, body: J({ error: e?.message || 'Server error' }) };
   }
 };
 
