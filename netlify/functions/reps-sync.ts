@@ -1,278 +1,213 @@
 // netlify/functions/reps-sync.ts
-import type { Handler } from '@netlify/functions'
-import { createClient } from '@supabase/supabase-js'
+import type { Handler } from '@netlify/functions';
+import { createClient } from '@supabase/supabase-js';
 
-// ── Env (server-only) ─────────────────────────────────────────────────────────
-const SUPABASE_URL = process.env.SUPABASE_URL as string
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string
-const CONGRESS_API_KEY = process.env.CONGRESS_API_KEY as string
+// ---- Required env ----
+// - SUPABASE_URL
+// - SUPABASE_SERVICE_ROLE_KEY
+// - (one of) CONGRESS_API_KEY or PROPUBLICA_API_KEY  (ProPublica Congress API)
+const SUPABASE_URL = process.env.SUPABASE_URL as string;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
+const CONGRESS_API_KEY =
+  (process.env.CONGRESS_API_KEY as string) || (process.env.PROPUBLICA_API_KEY as string) || '';
 
 const supabase =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
     ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-    : null
+    : null;
 
-const missingEnv = () => {
-  const miss: string[] = []
-  if (!SUPABASE_URL) miss.push('SUPABASE_URL')
-  if (!SUPABASE_SERVICE_ROLE_KEY) miss.push('SUPABASE_SERVICE_ROLE_KEY')
-  if (!CONGRESS_API_KEY) miss.push('CONGRESS_API_KEY')
-  return miss
+const headersCommon = {
+  'Content-Type': 'application/json',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,OPTIONS',
+};
+
+const PP_ROOT = 'https://api.propublica.org/congress/v1';
+
+type PPCurrentMember = {
+  id: string; // bioguide_id
+  first_name: string;
+  last_name: string;
+  district?: string | null; // House only
+  api_uri: string; // detail URL
+  party?: string | null;
+};
+
+// House/Senate detail payload (for contact_form/url)
+type PPDetail = {
+  results?: Array<{
+    url?: string | null;
+    contact_form?: string | null;
+  }>;
+};
+
+function stateToDivisionId(state: string): string {
+  return `ocd-division/country:us/state:${state.toLowerCase()}`;
 }
 
-// ── HTTP helpers ──────────────────────────────────────────────────────────────
-const jsonFetch = async (url: string) => {
-  const res = await fetch(url, { headers: { Accept: 'application/json' } })
+function houseDivisionId(state: string, district: string): string {
+  const d = district.toLowerCase() === 'at-large' ? '1' : district;
+  return `ocd-division/country:us/state:${state.toLowerCase()}/cd:${d}`;
+}
+
+async function fetchJSON<T>(url: string): Promise<T> {
+  const res = await fetch(url, { headers: { 'X-API-Key': CONGRESS_API_KEY } });
   if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Fetch failed ${res.status}: ${text || url}`)
+    const text = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} fetching ${url}: ${text.slice(0, 240)}`);
   }
-  return res.json()
+  return (await res.json()) as T;
 }
 
-const congressApi = (pathOrQuery: string) => {
-  // Accept either "member?currentMember=true..." or "/member/TX/10"
-  const root = 'https://api.congress.gov/v3/'
-  const isQueryStyle = pathOrQuery.includes('?')
-  const url = new URL(isQueryStyle ? `${root}${pathOrQuery}` : `${root}${pathOrQuery.replace(/^\//, '')}`)
-  if (!isQueryStyle) url.searchParams.set('format', 'json')
-  url.searchParams.set('api_key', CONGRESS_API_KEY)
-  return url.toString()
+async function getSenators(state: string): Promise<PPCurrentMember[]> {
+  // /members/senate/{state}/current.json
+  const url = `${PP_ROOT}/members/senate/${state}/current.json`;
+  const json: any = await fetchJSON<any>(url);
+  return (json?.results ?? []) as PPCurrentMember[];
 }
 
-// ── Shapes (simplified) ───────────────────────────────────────────────────────
-type MemberListItem = {
-  bioguideId?: string
-  name?: string
-  partyName?: string
-  state?: string // may be "TX" or "Texas"
-  district?: number | string | null
-  depiction?: { imageUrl?: string | null } | null
-  terms?: any
-}
-type MemberDetail = {
-  member?: {
-    bioguideId?: string
-    currentMember?: boolean
-    directOrderName?: string
-    officialWebsiteUrl?: string
-    state?: string
-    stateCode?: string
-    district?: number | string | null
-    addressInformation?: { phoneNumber?: string | null }
-    partyHistory?: Array<{ partyName?: string }>
-    depiction?: { imageUrl?: string | null }
-    terms?: Array<{ chamber?: string; congress?: number; district?: number | string | null; stateCode?: string }>
-  }
+async function getHouseMember(state: string, district: string): Promise<PPCurrentMember[]> {
+  // /members/house/{state}/{district}/current.json
+  const url = `${PP_ROOT}/members/house/${state}/${district}/current.json`;
+  const json: any = await fetchJSON<any>(url);
+  return (json?.results ?? []) as PPCurrentMember[];
 }
 
-// ── State normalization ───────────────────────────────────────────────────────
-const STATE_NAME_TO_CODE: Record<string, string> = {
-  Alabama: 'AL', Alaska: 'AK', Arizona: 'AZ', Arkansas: 'AR', California: 'CA', Colorado: 'CO', Connecticut: 'CT',
-  Delaware: 'DE', 'District of Columbia': 'DC', Florida: 'FL', Georgia: 'GA', Hawaii: 'HI', Idaho: 'ID', Illinois: 'IL',
-  Indiana: 'IN', Iowa: 'IA', Kansas: 'KS', Kentucky: 'KY', Louisiana: 'LA', Maine: 'ME', Maryland: 'MD', Massachusetts: 'MA',
-  Michigan: 'MI', Minnesota: 'MN', Mississippi: 'MS', Missouri: 'MO', Montana: 'MT', Nebraska: 'NE', Nevada: 'NV',
-  'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC',
-  'North Dakota': 'ND', Ohio: 'OH', Oklahoma: 'OK', Oregon: 'OR', Pennsylvania: 'PA', 'Rhode Island': 'RI',
-  'South Carolina': 'SC', 'South Dakota': 'SD', Tennessee: 'TN', Texas: 'TX', Utah: 'UT', Vermont: 'VT',
-  Virginia: 'VA', Washington: 'WA', 'West Virginia': 'WV', Wisconsin: 'WI', Wyoming: 'WY'
-}
-const toUSPS = (s?: string | null) => {
-  if (!s) return null
-  const t = s.trim()
-  if (t.length === 2) return t.toUpperCase()
-  return STATE_NAME_TO_CODE[t] || null
+async function getMemberDetail(apiUri: string): Promise<PPDetail> {
+  return fetchJSON<PPDetail>(apiUri);
 }
 
-// ── Congress.gov fetches ──────────────────────────────────────────────────────
-// Known reliable direct endpoint for one House member by state/district.
-const fetchHouseByStateDistrict = async (stateCode: string, district: string) => {
-  const url = congressApi(`/member/${encodeURIComponent(stateCode)}/${encodeURIComponent(district)}`)
-  const j = await jsonFetch(url)
-  // Response has a members array with one item (current member for that district)
-  const arr: any[] = Array.isArray(j?.members) ? j.members : []
-  return arr as MemberListItem[]
-}
+async function upsertFederalRows(rows: any[]) {
+  if (!rows.length) return;
 
-// Fall back: page current members list and locally filter to our state.
-const fetchCurrentMembersForState = async (stateCode: string) => {
-  let page = 1
-  const out: MemberListItem[] = []
-  // We’ll scan several pages; stop early once we’ve clearly found the state’s members.
-  while (page <= 6) {
-    const url = congressApi(`member?currentMember=true&limit=100&page=${page}`)
-    const j = await jsonFetch(url)
-    const members: any[] = Array.isArray(j?.members) ? j.members : []
-    for (const m of members) {
-      const stateNameOrCode = (m.state || '').toString()
-      const code = toUSPS(stateNameOrCode)
-      if (code === stateCode) out.push(m)
+  // Avoid duplicates without relying on a unique index: delete-by-civic_person_id, then insert.
+  for (const r of rows) {
+    const civicId = r.civic_person_id as string;
+    if (civicId) {
+      await supabase!.from('representatives').delete().eq('civic_person_id', civicId);
     }
-    const nextUrl = j?.pagination?.next
-    if (!nextUrl) break
-    page += 1
   }
-  return out
+  const { error } = await supabase!.from('representatives').insert(rows);
+  if (error) throw new Error(`Supabase insert failed: ${error.message}`);
 }
 
-const getMemberDetail = async (bioguideId: string): Promise<MemberDetail> => {
-  const url = congressApi(`member/${encodeURIComponent(bioguideId)}?format=json`)
-  return jsonFetch(url)
-}
-
-// ── Upsert helpers ────────────────────────────────────────────────────────────
-const toRepRow = (listItem: MemberListItem, detail: MemberDetail, chamber: 'senate' | 'house') => {
-  const m = detail?.member ?? {}
-  const photo = m?.depiction?.imageUrl ?? listItem?.depiction?.imageUrl ?? null
-  const website = m?.officialWebsiteUrl ?? null
-  const phone = m?.addressInformation?.phoneNumber ?? null
-
-  const stateCode = (m?.stateCode || listItem?.state || '').toString().toUpperCase() || null
-  const district =
-    chamber === 'house'
-      ? (String(m?.district ?? listItem?.district ?? '') || null)
-      : null
-
-  // We rarely get direct emails at federal level; fall back to website as contact form.
-  const contact_form_url = website || null
-
-  // Required elsewhere in your DB: division_id. Senators don’t have a CD; House does.
-  const division_id =
-    chamber === 'senate'
-      ? (stateCode ? `ocd-division/country:us/state:${stateCode.toLowerCase()}` : null)
-      : (stateCode && district ? `ocd-division/country:us/state:${stateCode.toLowerCase()}/cd:${String(district).toLowerCase()}` : null)
-
-  return {
-    civic_person_id: (m?.bioguideId || listItem?.bioguideId || '').trim() || null,
-    name: m?.directOrderName || listItem?.name || null,
-    party: m?.partyHistory?.[0]?.partyName || (listItem?.partyName ?? null),
-    photo_url: photo,
-
-    // ✅ Match your schema
-    office_name: chamber === 'senate' ? 'U.S. Senator' : 'U.S. Representative',
-    level: 'federal',
-    chamber,
-
-    state: stateCode,
-    district,
-
-    contact_email: null,
-    contact_form_url,
-    phone,
-    website,
-
-    twitter: null,
-    facebook: null,
-
-    term_end: null,
-    active: true,
-    division_id,          // important if your column is NOT NULL
-    last_synced: new Date().toISOString(),
-  }
-}
-
-const upsertRep = async (row: any) => {
-  const { data, error } = await (supabase as any)
-    .from('representatives')
-    .upsert(row, { onConflict: 'civic_person_id' })
-    .select('id')
-    .single()
-  if (error) throw new Error(error.message)
-  return data?.id as string | null
-}
-
-// ── Handler ───────────────────────────────────────────────────────────────────
 export const handler: Handler = async (event) => {
   try {
-    const miss = missingEnv()
-    if (miss.length) {
-      return { statusCode: 500, body: JSON.stringify({ ok: false, message: `Missing: ${miss.join(', ')}` }) }
+    if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: headersCommon, body: '' };
+    if (event.httpMethod !== 'GET') {
+      return { statusCode: 405, headers: headersCommon, body: JSON.stringify({ error: 'Use GET' }) };
+    }
+
+    // Env checks
+    const missing: string[] = [];
+    if (!SUPABASE_URL) missing.push('SUPABASE_URL');
+    if (!SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (!CONGRESS_API_KEY) missing.push('CONGRESS_API_KEY (or PROPUBLICA_API_KEY)');
+    if (missing.length) {
+      return {
+        statusCode: 500,
+        headers: headersCommon,
+        body: JSON.stringify({ error: `Missing env: ${missing.join(', ')}` }),
+      };
     }
     if (!supabase) {
-      return { statusCode: 500, body: JSON.stringify({ ok: false, message: 'Supabase client not initialized' }) }
+      return { statusCode: 500, headers: headersCommon, body: JSON.stringify({ error: 'Supabase not initialized' }) };
     }
 
-    const qs = event.queryStringParameters || {}
-    const stateParam = (qs.state || '').toString().trim()
-    const districtParam = (qs.house_district || '').toString().trim()
+    const qs = event.queryStringParameters || {};
+    const state = (qs.state || '').toString().trim().toUpperCase();
+    const houseDistrict = (qs.house_district || '').toString().trim();
 
-    const stateCode = toUSPS(stateParam) || toUSPS(stateParam.toUpperCase()) // accept “TX” or “Texas”
-    if (!stateCode) {
-      return { statusCode: 400, body: JSON.stringify({ ok: false, message: 'Provide ?state=TX (2-letter) or full name' }) }
+    if (!state || state.length !== 2) {
+      return {
+        statusCode: 400,
+        headers: headersCommon,
+        body: JSON.stringify({ error: 'Provide ?state=XX (two-letter code)' }),
+      };
     }
 
-    const results: Array<{ office: string; name: string; ok: boolean; error?: string }> = []
+    // 1) Senators (always)
+    const senators = await getSenators(state);
 
-    // 1) Senators (2)
-    {
-      const all = await fetchCurrentMembersForState(stateCode)
-      const senateCandidates = all.filter((m) => {
-        const terms = (m as any)?.terms || []
-        return terms.some((t: any) => String(t?.chamber || '').toLowerCase() === 'senate')
+    // 2) House (only if district provided)
+    let house: PPCurrentMember[] = [];
+    if (houseDistrict) {
+      house = await getHouseMember(state, houseDistrict);
+    }
+
+    // Fetch details (contact forms/URLs) — small N (<=3)
+    const all = [...senators, ...house];
+    const detailsById = new Map<string, PPDetail>();
+    await Promise.all(
+      all.map(async (m) => {
+        try {
+          const d = await getMemberDetail(m.api_uri);
+          detailsById.set(m.id, d);
+        } catch {
+          // ignore detail failures; we'll still insert base row
+        }
       })
+    );
 
-      // Pull details + upsert
-      for (const s of senateCandidates) {
-        const detail = await getMemberDetail(s.bioguideId!)
-        const row = toRepRow(s, detail, 'senate')
-        try {
-          const repId = await upsertRep(row)
-          if (repId && row.division_id) {
-            await (supabase as any)
-              .from('representative_divisions')
-              .upsert({ rep_id: repId, ocd_division_id: row.division_id }, { onConflict: 'rep_id,ocd_division_id' })
-          }
-          results.push({ office: 'U.S. Senator', name: row.name || '(unknown)', ok: true })
-        } catch (e: any) {
-          results.push({ office: 'U.S. Senator', name: row.name || '(unknown)', ok: false, error: e?.message || 'upsert failed' })
-        }
-      }
+    const rows: any[] = [];
+
+    // Map senators
+    for (const m of senators) {
+      const det = detailsById.get(m.id)?.results?.[0] || {};
+      rows.push({
+        // identification
+        civic_person_id: m.id, // bioguide id
+        level: 'federal',
+        chamber: 'senate',
+        state,
+        district: null,
+        division_id: stateToDivisionId(state),
+        // display/contact
+        name: `${m.first_name} ${m.last_name}`.trim(),
+        office_name: 'U.S. Senator',
+        email: null,
+        contact_email: null,
+        contact_form_url: det.contact_form || det.url || null,
+        party: m.party || null,
+        source: 'propublica',
+      });
     }
 
-    // 2) House (one or more; direct by district if provided)
-    if (districtParam) {
-      const list = await fetchHouseByStateDistrict(stateCode, districtParam)
-      for (const h of list) {
-        const detail = await getMemberDetail(h.bioguideId!)
-        const row = toRepRow(h, detail, 'house')
-        try {
-          const repId = await upsertRep(row)
-          if (repId && row.division_id) {
-            await (supabase as any)
-              .from('representative_divisions')
-              .upsert({ rep_id: repId, ocd_division_id: row.division_id }, { onConflict: 'rep_id,ocd_division_id' })
-          }
-          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: true })
-        } catch (e: any) {
-          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: false, error: e?.message || 'upsert failed' })
-        }
-      }
-    } else {
-      // No specific district: fall back to list + local filter for House
-      const all = await fetchCurrentMembersForState(stateCode)
-      const houseCandidates = all.filter((m) => {
-        const terms = (m as any)?.terms || []
-        return terms.some((t: any) => String(t?.chamber || '').toLowerCase() === 'house')
-      })
-      for (const h of houseCandidates) {
-        const detail = await getMemberDetail(h.bioguideId!)
-        const row = toRepRow(h, detail, 'house')
-        try {
-          const repId = await upsertRep(row)
-          if (repId && row.division_id) {
-            await (supabase as any)
-              .from('representative_divisions')
-              .upsert({ rep_id: repId, ocd_division_id: row.division_id }, { onConflict: 'rep_id,ocd_division_id' })
-          }
-          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: true })
-        } catch (e: any) {
-          results.push({ office: 'U.S. Representative', name: row.name || '(unknown)', ok: false, error: e?.message || 'upsert failed' })
-        }
-      }
+    // Map house member (if any)
+    for (const m of house) {
+      const det = detailsById.get(m.id)?.results?.[0] || {};
+      const d = m.district || houseDistrict || 'At-Large';
+      rows.push({
+        civic_person_id: m.id,
+        level: 'federal',
+        chamber: 'house',
+        state,
+        district: d,
+        division_id: houseDivisionId(state, d),
+        name: `${m.first_name} ${m.last_name}`.trim(),
+        office_name: 'U.S. Representative',
+        email: null,
+        contact_email: null,
+        contact_form_url: det.contact_form || det.url || null,
+        party: m.party || null,
+        source: 'propublica',
+      });
     }
 
-    return { statusCode: 200, body: JSON.stringify({ ok: true, state: stateCode, count: results.length, results }) }
+    await upsertFederalRows(rows);
+
+    return {
+      statusCode: 200,
+      headers: headersCommon,
+      body: JSON.stringify({ ok: true, upserted: rows.length, state, house_district: houseDistrict || null }),
+    };
   } catch (e: any) {
-    return { statusCode: 500, body: JSON.stringify({ ok: false, message: e?.message || 'Server error' }) }
+    return {
+      statusCode: 500,
+      headers: headersCommon,
+      body: JSON.stringify({ error: e?.message || 'Server error' }),
+    };
   }
-}
+};
+
+export default handler;
