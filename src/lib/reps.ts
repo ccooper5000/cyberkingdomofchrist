@@ -205,34 +205,35 @@ await ensureRepsSeeded(state, addr?.cd ?? null, addr?.sd ?? null, addr?.hd ?? nu
     if (data?.length) repIds.push(...data.map((r: RepRowDB) => r.id));
   }
 
-  // 3) State Senate (upper) — by SD
-  if (sd) {
-    const { data, error } = await (supabase as any)
-      .from('representatives')
-      .select('id, state, office_name, level, chamber, district')
-      .eq('state', state)
-      .eq('level', 'state')
-      .or("chamber.eq.upper,chamber.eq.senate,office_name.ilike.%senate%,office_name.ilike.%senator%")
+  // 3) State Senator by SD (upper)
+if (addr?.sd) {
+  const sd = String(addr.sd);
+  const { data, error } = await (supabase as any)
+    .from('representatives')
+    .select('id, state, office_name, level, chamber, district')
+    .eq('state', state)
+    .eq('level', 'state')
+    .in('chamber', ['upper', 'senate'])
+    .eq('district', sd)
+    .limit(1);
+  if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state senate).' };
+  if (data?.length) repIds.push(...data);
+}
 
-      .eq('district', sd)
-      .limit(5);
-    if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state senate).' };
-    if (data?.length) repIds.push(...data.map((r: RepRowDB) => r.id));
-  }
-
-  // 4) State House (lower) — by HD
-  if (hd) {
-    const { data, error } = await (supabase as any)
-      .from('representatives')
-      .select('id, state, office_name, level, chamber, district')
-      .eq('state', state)
-      .eq('level', 'state')
-      .or("chamber.eq.lower,chamber.eq.house,office_name.ilike.%representative%,office_name.ilike.%assembly%")
-      .eq('district', hd)
-      .limit(5);
-    if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state house).' };
-    if (data?.length) repIds.push(...data.map((r: RepRowDB) => r.id));
-  }
+  // 4) State Representative by HD (lower)
+if (addr?.hd) {
+  const hd = String(addr.hd);
+  const { data, error } = await (supabase as any)
+    .from('representatives')
+    .select('id, state, office_name, level, chamber, district')
+    .eq('state', state)
+    .eq('level', 'state')
+    .in('chamber', ['lower', 'house'])
+    .eq('district', hd)
+    .limit(1);
+  if (error) return { assigned: 0, state, message: error.message || 'Representative fetch failed (state house).' };
+  if (data?.length) repIds.push(...data);
+}
 
   // Require at least one match; DO NOT fall back to "all state reps" (avoids showing sample/irrelevant officials)
   const uniqueIds = Array.from(new Set(repIds));
