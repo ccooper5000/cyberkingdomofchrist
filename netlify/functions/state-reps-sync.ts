@@ -71,6 +71,151 @@ const fetchJSON = async (url: string) => {
 const pick = (...vals: any[]) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return null; };
 const fullName = (p: any) => String(p.name || `${pick(p.given_name, p.givenName, '')} ${pick(p.family_name, p.familyName, '')}` || '').trim();
 
+const arr = (x: any) => (Array.isArray(x) ? x : []);
+const extractPeople = (js: any): any[] =>
+  arr(js?.results) || arr(js?.data) || arr(js?.people) || arr(js?.items) || [];
+
+/** Extract best-known email from OpenStates person object */
+const extractEmail = (person: any): string | null => {
+  const direct = pick(person?.email, person?.primary_email);
+  if (direct) return String(direct);
+
+  // Offices array: look for any office.email
+  for (const off of arr(person?.offices)) {
+    if (off?.email) return String(off.email);
+  }
+  // contact_details array: {type: 'email', value: '...'}
+  for (const cd of arr(person?.contact_details)) {
+    const type = String(cd?.type || '').toLowerCase();
+    if (type === 'email' && cd?.value) return String(cd.value);
+  }
+  return null;
+};
+
+/** Normalize a Twitter handle: strip URL/@ and keep [A-Za-z0-9_]{1,15} */
+const normalizeTwitterHandle = (val: string): string | null => {
+  if (!val) return null;
+  let v = String(val).trim();
+  if (v.startsWith('@')) v = v.slice(1);
+  try {
+    if (/^https?:\/\//i.test(v)) {
+      const u = new URL(v);
+      if (u.hostname.replace(/^www\./,'').toLowerCase() === 'twitter.com' || u.hostname.toLowerCase() === 'x.com') {
+        const seg = u.pathname.split('/').filter(Boolean)[0] || '';
+        v = seg.startsWith('@') ? seg.slice(1) : seg;
+      }
+    }
+  } catch { /* ignore URL parse */ }
+  v = v.replace(/[^A-Za-z0-9_]/g, '');
+  if (!v) return null;
+  return v.slice(0, 15); // Twitter max handle length
+};
+
+/** Extract Twitter handle from various OpenStates shapes */
+const extractTwitterHandle = (person: any): string | null => {
+  // ids.twitter or social_media.twitter
+  const idsTw = pick(person?.ids?.twitter, person?.twitter, person?.social_media?.twitter);
+  const normIds = idsTw ? normalizeTwitterHandle(String(idsTw)) : null;
+  if (normIds) return normIds;
+
+  // contact_details may have type 'twitter'
+  for (const cd of arr(person?.contact_details)) {
+    const type = String(cd?.type || '').toLowerCase();
+    if (type === 'twitter' && cd?.value) {
+      const norm = normalizeTwitterHandle(String(cd.value));
+      if (norm) return norm;
+    }
+  }
+
+  // links may contain twitter URL
+  for (const link of arr(person?.links)) {
+    const url = String(link?.url || '');
+    if (/twitter\.com|x\.com/i.test(url)) {
+      const norm = normalizeTwitterHandle(url);
+      if (norm) return norm;
+    }
+  }
+  return null;
+};
+
+/** Normalize a Facebook page URL; if given a slug/ID, prefix with https://www.facebook.com/ */
+const normalizeFacebookUrl = (val: string): string | null => {
+  if (!val) return null;
+  let v = String(val).trim();
+  if (!/^https?:\/\//i.test(v)) {
+    // treat as slug/username
+    v = `https://www.facebook.com/${v.replace(/^@/, '')}`;
+  }
+  try {
+    const u = new URL(v);
+    if (!/facebook\.com$/i.test(u.hostname.replace(/^www\./,''))) return null;
+    // strip query fragments for cleanliness
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return null;
+  }
+};
+
+/** Extract Facebook page URL from various OpenStates shapes */
+const extractFacebookUrl = (person: any): string | null => {
+  const idsFb = pick(person?.ids?.facebook, person?.facebook, person?.social_media?.facebook);
+  const normIds = idsFb ? normalizeFacebookUrl(String(idsFb)) : null;
+  if (normIds) return normIds;
+
+  for (const cd of arr(person?.contact_details)) {
+    const type = String(cd?.type || '').toLowerCase();
+    if (type === 'facebook' && cd?.value) {
+      const norm = normalizeFacebookUrl(String(cd.value));
+      if (norm) return norm;
+    }
+  }
+  for (const link of arr(person?.links)) {
+    const url = String(link?.url || '');
+    if (/facebook\.com/i.test(url)) {
+      const norm = normalizeFacebookUrl(url);
+      if (norm) return norm;
+    }
+  }
+  return null;
+};
+
+/** Build common row fields from an OpenStates person */
+const buildRepRow = (opts: {
+  person: any;
+  level: 'state';
+  chamber: 'senate' | 'house';
+  state: string;
+  district: string;
+  division_id: string;
+  office_name: string;
+}) => {
+  const { person, level, chamber, state, district, division_id, office_name } = opts;
+  const email = extractEmail(person);
+  const twitter_handle = extractTwitterHandle(person);
+  const facebook_page_url = extractFacebookUrl(person);
+
+  return {
+    level,
+    chamber,
+    state,
+    district,
+    division_id,
+    name: fullName(person),
+    office_name,
+    // email -> both email + contact_email for state-level (so sender can deliver)
+    email: email ?? null,
+    contact_email: email ?? null,
+    // socials (new columns)
+    twitter_handle: twitter_handle ?? null,
+    facebook_page_url: facebook_page_url ?? null,
+    // generic site/contact URLs, if present
+    contact_form_url:
+      (person?.url || person?.website || (arr(person?.links)[0]?.url as string) || null),
+  };
+};
+
 async function clearSlot(state: string, chamber: 'senate'|'house', district: string) {
   await supabase!.from('representatives')
     .delete()
@@ -111,25 +256,23 @@ export const handler: Handler = async (event) => {
     // ── 1) State Senator (upper / SD) ───────────────────────────────────────
     let seededSD = 0;
     if (sd) {
-      // OpenStates people search for upper chamber district
       const urlUpper = apiURL({ jurisdiction, chamber: 'upper', district: sd });
       const jsU = await fetchJSON(urlUpper);
-      const peopleU: any[] = (jsU?.results ?? jsU?.data ?? jsU?.people ?? jsU?.items ?? []);
-      const personU = peopleU[0]; // there should be exactly one
-      await clearSlot(state, 'senate', sd);
+      const peopleU = extractPeople(jsU);
+      const personU = peopleU[0]; // expect exactly one
+
       if (personU) {
-        const row = {
+        const row = buildRepRow({
+          person: personU,
           level: 'state',
           chamber: 'senate',
           state,
           district: sd,
           division_id: slduDiv(state, sd),
-          name: fullName(personU),
           office_name: 'State Senator',
-          email: pick(personU.email, personU.primary_email) || null,
-          contact_email: null,
-          contact_form_url: pick(personU.url, personU.website, personU.links?.[0]?.url) || null,
-        };
+        });
+        // clear only once we have a row to insert
+        await clearSlot(state, 'senate', sd);
         await insertOne(row);
         seededSD = 1;
       }
@@ -140,22 +283,20 @@ export const handler: Handler = async (event) => {
     if (hd) {
       const urlLower = apiURL({ jurisdiction, chamber: 'lower', district: hd });
       const jsL = await fetchJSON(urlLower);
-      const peopleL: any[] = (jsL?.results ?? jsL?.data ?? jsL?.people ?? jsL?.items ?? []);
+      const peopleL = extractPeople(jsL);
       const personL = peopleL[0];
-      await clearSlot(state, 'house', hd);
+
       if (personL) {
-        const row = {
+        const row = buildRepRow({
+          person: personL,
           level: 'state',
           chamber: 'house',
           state,
           district: hd,
           division_id: sldlDiv(state, hd),
-          name: fullName(personL),
           office_name: 'State Representative',
-          email: pick(personL.email, personL.primary_email) || null,
-          contact_email: null,
-          contact_form_url: pick(personL.url, personL.website, personL.links?.[0]?.url) || null,
-        };
+        });
+        await clearSlot(state, 'house', hd);
         await insertOne(row);
         seededHD = 1;
       }
