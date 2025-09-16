@@ -4,6 +4,8 @@ import { supabase } from '@/lib/supabase';
 import { assignRepsForCurrentUser } from '@/lib/reps';
 import { outreach, type OutreachChannel, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
+import { useRef } from 'react';
+
 
 // — Social share helpers (UI-only, safe) —
 function buildTweetIntentText(repNames: string[], base: string) {
@@ -11,17 +13,20 @@ function buildTweetIntentText(repNames: string[], base: string) {
   const more = repNames.length > 3 ? `, +${repNames.length - 3} more` : '';
   return `${base} ${names}${more}`.trim();
 }
-function buildTweetUrl(text: string, url?: string) {
-  const p = new URLSearchParams({ text });
-  if (url) p.set('url', url);
-  return `https://x.com/intent/tweet?${p.toString()}`;
+// — Social share helpers (UI-only, safe) —
+function buildTweetUrl(repName: string, text?: string, url?: string) {
+  const content = [text?.trim() || 'Please consider this prayer.', repName].join(' ').trim();
+  const params = new URLSearchParams({ text: content });
+  if (url) params.set('url', url);
+  return `https://x.com/intent/tweet?${params.toString()}`;
 }
 function buildFacebookShareUrl(url?: string, quote?: string) {
-  const p = new URLSearchParams();
-  if (url) p.set('u', url);
-  if (quote && quote.trim()) p.set('quote', quote.trim());
-  return `https://www.facebook.com/sharer/sharer.php?${p.toString()}`;
+  const params = new URLSearchParams();
+  if (url) params.set('u', url);
+  if (quote && quote.trim()) params.set('quote', quote.trim());
+  return `https://www.facebook.com/sharer/sharer.php?${params.toString()}`;
 }
+
 
 
 // — Social share helpers (UI-only, safe) —
@@ -160,6 +165,8 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [body, setBody] = useState<string>(''); // server will prepend greeting per recipient
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const draftRef = useRef<HTMLTextAreaElement | null>(null);
+
 
   // Tier & quota UI
   const [tier, setTier] = useState<Tier>('free');
@@ -542,6 +549,38 @@ CyberKingdomOfChrist.org`;
                           <div>
                             <div className="font-medium">{displayNameForRep(r)}</div>
                             <div className="text-xs text-gray-600">{r.office}</div>
+                {/* Per-rep social share (UI-only) */}
+{(() => {
+  const pageUrl = typeof window !== 'undefined' ? window.location.href : undefined;
+  const repLabel = typeof displayNameForRep === 'function'
+    ? displayNameForRep(r)
+    : (r.name ?? 'Representative');
+
+  // Use the current Draft text if available; otherwise a friendly fallback
+  const draft = (typeof draftRef !== 'undefined' && draftRef?.current?.value?.trim()) || '';
+  const tweetText = (draft && draft.length <= 240 ? draft : 'Please consider this prayer.') + ' ' + repLabel;
+  const fbQuote   = draft || `Please consider this prayer. ${repLabel}`;
+
+  const tweetUrl = buildTweetUrl(repLabel, tweetText, pageUrl);
+  const fbUrl    = buildFacebookShareUrl(pageUrl, fbQuote);
+
+  return (
+    <div className="mt-1 flex gap-2">
+      <a href={tweetUrl} target="_blank" rel="noopener noreferrer"
+         className="inline-flex items-center rounded px-2 py-1 text-xs border"
+         title="Tweet (opens composer)">
+        Tweet
+      </a>
+      <a href={fbUrl} target="_blank" rel="noopener noreferrer"
+         className="inline-flex items-center rounded px-2 py-1 text-xs border"
+         title="Share on Facebook (opens share dialog)">
+        Share
+      </a>
+    </div>
+  );
+})()}
+
+
                           </div>
                         </label>
                       ))}
@@ -589,42 +628,10 @@ CyberKingdomOfChrist.org`;
                     <div className="mt-2">The server will prepend the correct greeting for each recipient.</div>
                   </div>
                 )}
-                <textarea value={body} onChange={(e) => setBody(e.target.value)} className="w-full border rounded-md px-3 py-2 min-h-[180px]" placeholder="Body (greeting added per recipient on send)" />
+                <textarea value={body} onChange={(e) => setBody(e.target.value)} className="w-full border rounded-md px-3 py-2 min-h-[180px]" placeholder="Body (greeting added per recipient on send)" ref={draftRef}/>
                 <p className="text-xs text-gray-500">Delivery happens server-side.</p>
 
-                {/* — Social share (UI-only, safe) — */}
-{(() => {
-  // List of currently selected recipients (already defined in this component)
-  const repNames = selectedReps.map(r => r.name ?? 'Representative');
-  const pageUrl = typeof window !== 'undefined' ? window.location.href : undefined;
-  const baseText = 'Please consider this prayer.';
-  const tweetText = buildTweetIntentText(repNames, baseText);
-  const tweetUrl = buildTweetUrl(tweetText, pageUrl);
-  const fbUrl = buildFacebookShareUrl(pageUrl, `${baseText} ${repNames.join(', ')}`.trim());
 
-  return (
-    <div className="mt-3 flex gap-2">
-      <a
-        href={tweetUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex items-center rounded px-2 py-1 text-sm border"
-        title="Tweet (opens composer)"
-      >
-        X
-      </a>
-      <a
-        href={fbUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex items-center rounded px-2 py-1 text-sm border"
-        title="Share on Facebook (opens share dialog)"
-      >
-        Facebook
-      </a>
-    </div>
-  );
-})()}
 
               </div>
             </div>
