@@ -107,6 +107,45 @@ async function clearSlot(state: string, chamber: 'senate' | 'house', district?: 
   }
 }
 
+// ── Robust Senator fetch (mirror House multi-strategy approach) ───────────────
+async function fetchSenatorsForState(state: string): Promise<any[]> {
+  // Strategy A: query endpoint with explicit filters (preferred)
+  try {
+    const urlA = apiURL('member', { state, chamber: 'Senate', currentMember: true, limit: 500 });
+    const jsA = await fetchJSON(urlA);
+    const listA: any[] = (jsA?.members ?? jsA?.data?.members ?? jsA?.results ?? []);
+    const filteredA = listA
+      .filter(m => (memberStateCode(m) ?? state) === state)
+      .filter(m => detectChamber(m) === 'senate');
+    if (filteredA.length >= 2) return filteredA.slice(0, 2);
+  } catch { /* fall through */ }
+
+  // Strategy B: state-path endpoint then filter by chamber
+  try {
+    const urlB = apiURL(`member/${state}`, { currentMember: true, limit: 250 });
+    const jsB = await fetchJSON(urlB);
+    const listB: any[] = (jsB?.members ?? jsB?.data?.members ?? jsB?.results ?? []);
+    const filteredB = listB
+      .filter(m => (memberStateCode(m) ?? state) === state)
+      .filter(m => detectChamber(m) === 'senate');
+    if (filteredB.length >= 2) return filteredB.slice(0, 2);
+    if (filteredB.length > 0) return filteredB; // at least something
+  } catch { /* fall through */ }
+
+  // Strategy C: chamber-only query then filter by state
+  try {
+    const urlC = apiURL('member', { chamber: 'Senate', currentMember: true, limit: 500 });
+    const jsC = await fetchJSON(urlC);
+    const listC: any[] = (jsC?.members ?? jsC?.data?.members ?? jsC?.results ?? []);
+    const filteredC = listC
+      .filter(m => (memberStateCode(m) ?? state) === state)
+      .filter(m => detectChamber(m) === 'senate');
+    if (filteredC.length) return filteredC.slice(0, 2);
+  } catch { /* final fall through */ }
+
+  return [];
+}
+
 // ── Handler ──────────────────────────────────────────────────────────────────
 export const handler: Handler = async (event) => {
   try {
@@ -128,42 +167,17 @@ export const handler: Handler = async (event) => {
     }
 
     // ── 1) U.S. SENATORS ────────────────────────────────────────────────────
-    // Try state-path endpoint, then fall back to a chamber query.
-    const urlSenPath = apiURL(`member/${state}`, { currentMember: true, limit: 250 });
-    const jsSenPath = await fetchJSON(urlSenPath);
-    const listPath: any[] = (jsSenPath?.members ?? jsSenPath?.data?.members ?? jsSenPath?.results ?? []);
-
-    const pathSenators = listPath
-      // defensive: ensure the row looks like this state & senate
-      .filter(m => (memberStateCode(m) ?? state) === state)
-      .filter(m => detectChamber(m) === 'senate')
-      .slice(0, 2); // ensure we only keep 2
-
-    let finalSenators = pathSenators;
-    let usedFallbackForSen = false;
-
-    if (finalSenators.length < 2) {
-      // Fallback: pull across all senators, filter by state
-      const urlSenQuery = apiURL('member', { chamber: 'Senate', currentMember: true, limit: 500 });
-      const jsSenQuery = await fetchJSON(urlSenQuery);
-      const listQuery: any[] = (jsSenQuery?.members ?? jsSenQuery?.data?.members ?? jsSenQuery?.results ?? []);
-      finalSenators = listQuery
-        .filter(m => (memberStateCode(m) ?? state) === state)
-        .filter(m => detectChamber(m) === 'senate')
-        .slice(0, 2);
-      usedFallbackForSen = finalSenators.length >= 1;
-    }
-
+    const senators = await fetchSenatorsForState(state);
     await clearSlot(state, 'senate');
 
     let seededSen = 0;
-    if (finalSenators.length) {
-      const rows = finalSenators.map(m => ({
+    if (senators.length) {
+      const rows = senators.slice(0, 2).map(m => ({
         level: 'federal',
         chamber: 'senate',
         state,
         district: null,
-        division_id: stateDivisionId(state), // REQUIRED by your schema
+        division_id: stateDivisionId(state),
         name: memberName(m),
         office_name: 'U.S. Senator',
         email: null,
@@ -176,6 +190,7 @@ export const handler: Handler = async (event) => {
     }
 
     // ── 2) U.S. HOUSE ───────────────────────────────────────────────────────
+    // (Unchanged logic; this is your working path)
     let seededHouse = 0;
     let usedFallbackForHouse = false;
 
@@ -213,7 +228,7 @@ export const handler: Handler = async (event) => {
             chamber: 'house',
             state,
             district: d,
-            division_id: houseDivisionId(state, d), // REQUIRED by your schema
+            division_id: houseDivisionId(state, d),
             name: memberName(m),
             office_name: 'U.S. Representative',
             email: null,
@@ -236,7 +251,6 @@ export const handler: Handler = async (event) => {
         debug: {
           state,
           senateSeeded: seededSen,
-          senateUsedFallback: usedFallbackForSen,
           houseDistrict: districtRaw || null,
           houseSeeded: seededHouse,
           houseUsedFallback: usedFallbackForHouse
