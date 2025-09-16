@@ -167,27 +167,49 @@ export const handler: Handler = async (event) => {
     }
 
     // ── 1) U.S. SENATORS ────────────────────────────────────────────────────
-    const senators = await fetchSenatorsForState(state);
-    await clearSlot(state, 'senate');
+const urlSenPath = apiURL(`member/${state}`, { currentMember: true, limit: 250 });
+const jsSenPath = await fetchJSON(urlSenPath);
+const listPath: any[] = (jsSenPath?.members ?? jsSenPath?.data?.members ?? jsSenPath?.results ?? []);
 
-    let seededSen = 0;
-    if (senators.length) {
-      const rows = senators.slice(0, 2).map(m => ({
-        level: 'federal',
-        chamber: 'senate',
-        state,
-        district: null,
-        division_id: stateDivisionId(state),
-        name: memberName(m),
-        office_name: 'U.S. Senator',
-        email: null,
-        contact_email: null,
-        contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
-      }));
-      const { error } = await supabase!.from('representatives').insert(rows);
-      if (error) throw new Error(`Supabase insert (senate) failed: ${error.message}`);
-      seededSen = rows.length;
-    }
+const pathSenators = listPath
+  .filter(m => (memberStateCode(m) ?? state) === state)
+  .filter(m => detectChamber(m) === 'senate')
+  .slice(0, 2);
+
+let finalSenators = pathSenators;
+let usedFallbackForSen = false;
+
+if (finalSenators.length < 2) {
+  const urlSenQuery = apiURL('member', { chamber: 'Senate', currentMember: true, limit: 500 });
+  const jsSenQuery = await fetchJSON(urlSenQuery);
+  const listQuery: any[] = (jsSenQuery?.members ?? jsSenQuery?.data?.members ?? jsSenQuery?.results ?? []);
+  finalSenators = listQuery
+    .filter(m => (memberStateCode(m) ?? state) === state)
+    .filter(m => detectChamber(m) === 'senate')
+    .slice(0, 2);
+  usedFallbackForSen = finalSenators.length >= 1;
+}
+
+await clearSlot(state, 'senate');
+
+let seededSen = 0;
+if (finalSenators.length) {
+  const rows = finalSenators.map(m => ({
+    level: 'federal',
+    chamber: 'senate',
+    state,
+    district: null,
+    division_id: stateDivisionId(state),
+    name: memberName(m),
+    office_name: 'U.S. Senator',
+    email: null,
+    contact_email: null,
+    contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
+  }));
+  const { error } = await supabase!.from('representatives').insert(rows);
+  if (error) throw new Error(`Supabase insert (senate) failed: ${error.message}`);
+  seededSen = rows.length;
+}
 
     // ── 2) U.S. HOUSE ───────────────────────────────────────────────────────
     // (Unchanged logic; this is your working path)
