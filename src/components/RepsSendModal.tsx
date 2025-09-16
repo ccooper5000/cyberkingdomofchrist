@@ -5,6 +5,44 @@ import { assignRepsForCurrentUser } from '@/lib/reps';
 import { outreach, type OutreachChannel, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
 
+// — Social share helpers (UI-only, safe) —
+function buildTweetIntentText(repNames: string[], base: string) {
+  const names = repNames.slice(0, 3).join(', ');
+  const more = repNames.length > 3 ? `, +${repNames.length - 3} more` : '';
+  return `${base} ${names}${more}`.trim();
+}
+function buildTweetUrl(text: string, url?: string) {
+  const p = new URLSearchParams({ text });
+  if (url) p.set('url', url);
+  return `https://x.com/intent/tweet?${p.toString()}`;
+}
+function buildFacebookShareUrl(url?: string, quote?: string) {
+  const p = new URLSearchParams();
+  if (url) p.set('u', url);
+  if (quote && quote.trim()) p.set('quote', quote.trim());
+  return `https://www.facebook.com/sharer/sharer.php?${p.toString()}`;
+}
+
+
+// — Social share helpers (UI-only, safe) —
+function buildTweetIntent(opts: { repName: string; twitterHandle?: string; text?: string; url?: string }) {
+  const { repName, twitterHandle, text, url } = opts;
+  const mention = twitterHandle?.trim() ? `@${twitterHandle.trim().replace(/^@/, '')}` : repName;
+  const params = new URLSearchParams();
+  params.set('text', [text?.trim() || 'Please consider this prayer.', mention].join(' ').trim());
+  if (url) params.set('url', url);
+  return `https://x.com/intent/tweet?${params.toString()}`;
+}
+
+function buildFacebookShare(opts: { url?: string; quote?: string }) {
+  const { url, quote } = opts;
+  const params = new URLSearchParams();
+  if (url) params.set('u', url);
+  if (quote?.trim()) params.set('quote', quote.trim());
+  return `https://www.facebook.com/sharer/sharer.php?${params.toString()}`;
+}
+
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
@@ -553,6 +591,41 @@ CyberKingdomOfChrist.org`;
                 )}
                 <textarea value={body} onChange={(e) => setBody(e.target.value)} className="w-full border rounded-md px-3 py-2 min-h-[180px]" placeholder="Body (greeting added per recipient on send)" />
                 <p className="text-xs text-gray-500">Delivery happens server-side.</p>
+
+                {/* — Social share (UI-only, safe) — */}
+{(() => {
+  // List of currently selected recipients (already defined in this component)
+  const repNames = selectedReps.map(r => r.name ?? 'Representative');
+  const pageUrl = typeof window !== 'undefined' ? window.location.href : undefined;
+  const baseText = 'Please consider this prayer.';
+  const tweetText = buildTweetIntentText(repNames, baseText);
+  const tweetUrl = buildTweetUrl(tweetText, pageUrl);
+  const fbUrl = buildFacebookShareUrl(pageUrl, `${baseText} ${repNames.join(', ')}`.trim());
+
+  return (
+    <div className="mt-3 flex gap-2">
+      <a
+        href={tweetUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center rounded px-2 py-1 text-sm border"
+        title="Tweet (opens composer)"
+      >
+        Tweet
+      </a>
+      <a
+        href={fbUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center rounded px-2 py-1 text-sm border"
+        title="Share on Facebook (opens share dialog)"
+      >
+        Share
+      </a>
+    </div>
+  );
+})()}
+
               </div>
             </div>
           </div>
