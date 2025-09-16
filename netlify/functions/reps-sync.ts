@@ -166,50 +166,60 @@ export const handler: Handler = async (event) => {
       return { statusCode: 400, headers: H, body: J({ error: 'Provide ?state=XX (two-letter code)' }) };
     }
 
-    // ── 1) U.S. SENATORS ────────────────────────────────────────────────────
-const urlSenPath = apiURL(`member/${state}`, { currentMember: true, limit: 250 });
-const jsSenPath = await fetchJSON(urlSenPath);
-const listPath: any[] = (jsSenPath?.members ?? jsSenPath?.data?.members ?? jsSenPath?.results ?? []);
-
-const pathSenators = listPath
-  .filter(m => (memberStateCode(m) ?? state) === state)
-  .filter(m => detectChamber(m) === 'senate')
-  .slice(0, 2);
-
-let finalSenators = pathSenators;
+    // ── 1) U.S. SENATORS (query endpoint only; stable) ──────────────────────
+let seededSen = 0;
 let usedFallbackForSen = false;
 
-if (finalSenators.length < 2) {
-  const urlSenQuery = apiURL('member', { chamber: 'Senate', currentMember: true, limit: 500 });
+try {
+  // Use a single, explicit query (more reliable than member/{STATE})
+  const urlSenQuery = apiURL('member', {
+    chamber: 'Senate',
+    state,
+    currentMember: true,
+    limit: 50,
+  });
+
   const jsSenQuery = await fetchJSON(urlSenQuery);
-  const listQuery: any[] = (jsSenQuery?.members ?? jsSenQuery?.data?.members ?? jsSenQuery?.results ?? []);
-  finalSenators = listQuery
+  const list: any[] = (jsSenQuery?.members ?? jsSenQuery?.data?.members ?? jsSenQuery?.results ?? []);
+
+  const finalSenators = list
     .filter(m => (memberStateCode(m) ?? state) === state)
     .filter(m => detectChamber(m) === 'senate')
     .slice(0, 2);
-  usedFallbackForSen = finalSenators.length >= 1;
+
+  await clearSlot(state, 'senate');
+
+  if (finalSenators.length) {
+    const rows = finalSenators.map(m => ({
+      level: 'federal',
+      chamber: 'senate',
+      state,
+      district: null,
+      division_id: stateDivisionId(state),
+      name: memberName(m),
+      office_name: 'U.S. Senator',
+      email: null,
+      contact_email: null,
+      contact_form_url:
+        pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
+    }));
+    const { error } = await supabase!.from('representatives').insert(rows);
+    if (error) throw new Error(`Supabase insert (senate) failed: ${error.message}`);
+    seededSen = rows.length;
+  }
+} catch (senErr: any) {
+  // Surface enough context to debug without leaking secrets
+  return {
+    statusCode: 500,
+    headers: H,
+    body: J({
+      error: 'Senate seeding failed',
+      detail: String(senErr?.message || senErr),
+      state
+    })
+  };
 }
 
-await clearSlot(state, 'senate');
-
-let seededSen = 0;
-if (finalSenators.length) {
-  const rows = finalSenators.map(m => ({
-    level: 'federal',
-    chamber: 'senate',
-    state,
-    district: null,
-    division_id: stateDivisionId(state),
-    name: memberName(m),
-    office_name: 'U.S. Senator',
-    email: null,
-    contact_email: null,
-    contact_form_url: pick(m.contactUrl, m.contactURL, m.url, m.website, m.officialWebsiteUrl) || null,
-  }));
-  const { error } = await supabase!.from('representatives').insert(rows);
-  if (error) throw new Error(`Supabase insert (senate) failed: ${error.message}`);
-  seededSen = rows.length;
-}
 
     // ── 2) U.S. HOUSE ───────────────────────────────────────────────────────
     // (Unchanged logic; this is your working path)
