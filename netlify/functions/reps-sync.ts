@@ -136,7 +136,8 @@ export const handler: Handler = async (event) => {
     const pathSenators = listPath
       // defensive: ensure the row looks like this state & senate
       .filter(m => (memberStateCode(m) ?? state) === state)
-      .filter(m => detectChamber(m) === 'senate');
+      .filter(m => detectChamber(m) === 'senate')
+      .slice(0, 2); // ensure we only keep 2
 
     let finalSenators = pathSenators;
     let usedFallbackForSen = false;
