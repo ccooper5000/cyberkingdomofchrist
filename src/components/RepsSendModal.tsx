@@ -47,6 +47,14 @@ function buildFacebookShare(opts: { url?: string; quote?: string }) {
   return `https://www.facebook.com/sharer/sharer.php?${params.toString()}`;
 }
 
+/** NEW: fixed feed URL + helper to build a tweet purely from text */
+const FEED_URL = 'https://cyberkingdomofchrist.netlify.app/feed';
+function buildTweetUrlText(text: string, url?: string) {
+  const params = new URLSearchParams({ text });
+  if (url) params.set('url', url);
+  return `https://x.com/intent/tweet?${params.toString()}`;
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
@@ -551,18 +559,18 @@ CyberKingdomOfChrist.org`;
                             <div className="text-xs text-gray-600">{r.office}</div>
                 {/* Per-rep social share (UI-only) */}
 {(() => {
-  const pageUrl = typeof window !== 'undefined' ? window.location.href : undefined;
-  const repLabel = typeof displayNameForRep === 'function'
-    ? displayNameForRep(r)
-    : (r.name ?? 'Representative');
+  // Prefer @handle when available; fall back to label
+  const handle = (r as any)?.twitter_handle as string | undefined;
+  const normalizedHandle = handle && handle.trim() ? `@${handle.replace(/^@/, '').trim()}` : displayNameForRep(r);
 
-  // Use the current Draft text if available; otherwise a friendly fallback
+  // Twitter: fixed CKOC phrasing + feed link
+  const twitterText = `${normalizedHandle}, please consider this prayer from CyberKingdomOfChrist`;
+  const tweetUrl = buildTweetUrlText(twitterText, FEED_URL);
+
+  // Facebook: use current Draft (prayer) if present; otherwise friendly fallback
   const draft = (typeof draftRef !== 'undefined' && draftRef?.current?.value?.trim()) || '';
-  const tweetText = (draft && draft.length <= 240 ? draft : 'Please consider this prayer.') + ' ' + repLabel;
-  const fbQuote   = draft || `Please consider this prayer. ${repLabel}`;
-
-  const tweetUrl = buildTweetUrl(repLabel, tweetText, pageUrl);
-  const fbUrl    = buildFacebookShareUrl(pageUrl, fbQuote);
+  const fbQuote = draft || `Please consider this prayer from CyberKingdomOfChrist. ${displayNameForRep(r)}`;
+  const fbUrl = buildFacebookShareUrl(FEED_URL, fbQuote);
 
   return (
     <div className="mt-1 flex gap-2">
