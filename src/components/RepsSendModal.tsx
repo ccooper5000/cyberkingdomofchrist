@@ -611,7 +611,7 @@ CyberKingdomOfChrist.org`;
         className="inline-flex items-center rounded px-2 py-1 text-sm border"
         title="Tweet (opens composer)"
       >
-        Tweet
+        X
       </a>
       <a
         href={fbUrl}
@@ -620,7 +620,7 @@ CyberKingdomOfChrist.org`;
         className="inline-flex items-center rounded px-2 py-1 text-sm border"
         title="Share on Facebook (opens share dialog)"
       >
-        Share
+        Facebook
       </a>
     </div>
   );
