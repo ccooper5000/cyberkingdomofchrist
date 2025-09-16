@@ -490,7 +490,7 @@ CyberKingdomOfChrist.org`;
               <div className="mb-3">
                 <div className="text-sm font-medium mb-2">Recipients</div>
                 <div className="border rounded-lg overflow-hidden">
-                  {(['federal','state','local'] as const).map(level => (
+                  {(['federal','state'] as const).map(level => (
                     <div key={level} className="border-b last:border-b-0">
                       <div className="bg-gray-50 px-3 py-1.5 text-xs font-semibold uppercase">{level}</div>
                       {(grouped[level] || []).map(r => (

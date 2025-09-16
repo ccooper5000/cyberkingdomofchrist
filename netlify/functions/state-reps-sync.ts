@@ -50,23 +50,51 @@ const stateDiv = (state: string) => `ocd-division/country:us/state:${state.toLow
 const slduDiv = (state: string, sd: string) => `${stateDiv(state)}/sldu:${String(sd).trim()}`;
 const sldlDiv = (state: string, hd: string) => `${stateDiv(state)}/sldl:${String(hd).trim()}`;
 
-const apiURL = (params: Record<string,string|number|undefined>) => {
+/** Build the people search URL. We include BOTH jurisdiction (full state name) and state code. */
+const apiURL = (params: Record<string,string|number|undefined>, state: string) => {
   const u = new URL('https://v3.openstates.org/people');
   for (const [k,v] of Object.entries(params)) if (v !== undefined) u.searchParams.set(k, String(v));
-  u.searchParams.set('apikey', OPENSTATES_API_KEY);
-  // We ask for small page sizes; there should be only 1 match for a single district
+  // Preferred search hints (both are accepted by OpenStates)
+  const jurisdiction = stateName(state);
+  u.searchParams.set('jurisdiction', jurisdiction);
+  u.searchParams.set('state', state);
+  // keep a small page size; we expect a single match
   u.searchParams.set('per_page', '5');
+  // still include apikey as a query param (harmless redundancy)
+  u.searchParams.set('apikey', OPENSTATES_API_KEY);
   return u.toString();
 };
 
-const fetchJSON = async (url: string) => {
-  const r = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!r.ok) {
-    const t = await r.text().catch(() => '');
-    throw new Error(`HTTP ${r.status} :: ${t.slice(0,240)}`);
+/** fetch with timeout + retries; include X-API-KEY + UA headers */
+async function fetchJSON(url: string, retry = 2): Promise<any> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000); // 10s
+  try {
+    const r = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'CKOC/1.0 (+https://cyberkingdomofchrist.org)',
+        'X-API-KEY': OPENSTATES_API_KEY,
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      throw new Error(`HTTP ${r.status} :: ${t.slice(0,240)}`);
+    }
+    return r.json();
+  } catch (err: any) {
+    clearTimeout(timeout);
+    const msg = String(err?.message || err || '');
+    // Retry on timeouts or transient upstream failures
+    if (retry > 0 && (/aborted|timeout|ETIMEDOUT|ECONNRESET|fetch failed|502|503|504/i.test(msg))) {
+      await new Promise(res => setTimeout(res, 350));
+      return fetchJSON(url, retry - 1);
+    }
+    throw new Error(`OpenStates fetch failed: ${msg}`);
   }
-  return r.json();
-};
+}
 
 const pick = (...vals: any[]) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return null; };
 const fullName = (p: any) => String(p.name || `${pick(p.given_name, p.givenName, '')} ${pick(p.family_name, p.familyName, '')}` || '').trim();
@@ -79,12 +107,7 @@ const extractPeople = (js: any): any[] =>
 const extractEmail = (person: any): string | null => {
   const direct = pick(person?.email, person?.primary_email);
   if (direct) return String(direct);
-
-  // Offices array: look for any office.email
-  for (const off of arr(person?.offices)) {
-    if (off?.email) return String(off.email);
-  }
-  // contact_details array: {type: 'email', value: '...'}
+  for (const off of arr(person?.offices)) if (off?.email) return String(off.email);
   for (const cd of arr(person?.contact_details)) {
     const type = String(cd?.type || '').toLowerCase();
     if (type === 'email' && cd?.value) return String(cd.value);
@@ -108,17 +131,14 @@ const normalizeTwitterHandle = (val: string): string | null => {
   } catch { /* ignore URL parse */ }
   v = v.replace(/[^A-Za-z0-9_]/g, '');
   if (!v) return null;
-  return v.slice(0, 15); // Twitter max handle length
+  return v.slice(0, 15);
 };
 
 /** Extract Twitter handle from various OpenStates shapes */
 const extractTwitterHandle = (person: any): string | null => {
-  // ids.twitter or social_media.twitter
   const idsTw = pick(person?.ids?.twitter, person?.twitter, person?.social_media?.twitter);
   const normIds = idsTw ? normalizeTwitterHandle(String(idsTw)) : null;
   if (normIds) return normIds;
-
-  // contact_details may have type 'twitter'
   for (const cd of arr(person?.contact_details)) {
     const type = String(cd?.type || '').toLowerCase();
     if (type === 'twitter' && cd?.value) {
@@ -126,8 +146,6 @@ const extractTwitterHandle = (person: any): string | null => {
       if (norm) return norm;
     }
   }
-
-  // links may contain twitter URL
   for (const link of arr(person?.links)) {
     const url = String(link?.url || '');
     if (/twitter\.com|x\.com/i.test(url)) {
@@ -142,20 +160,13 @@ const extractTwitterHandle = (person: any): string | null => {
 const normalizeFacebookUrl = (val: string): string | null => {
   if (!val) return null;
   let v = String(val).trim();
-  if (!/^https?:\/\//i.test(v)) {
-    // treat as slug/username
-    v = `https://www.facebook.com/${v.replace(/^@/, '')}`;
-  }
+  if (!/^https?:\/\//i.test(v)) v = `https://www.facebook.com/${v.replace(/^@/, '')}`;
   try {
     const u = new URL(v);
     if (!/facebook\.com$/i.test(u.hostname.replace(/^www\./,''))) return null;
-    // strip query fragments for cleanliness
-    u.search = '';
-    u.hash = '';
+    u.search = ''; u.hash = '';
     return u.toString();
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 };
 
 /** Extract Facebook page URL from various OpenStates shapes */
@@ -163,7 +174,6 @@ const extractFacebookUrl = (person: any): string | null => {
   const idsFb = pick(person?.ids?.facebook, person?.facebook, person?.social_media?.facebook);
   const normIds = idsFb ? normalizeFacebookUrl(String(idsFb)) : null;
   if (normIds) return normIds;
-
   for (const cd of arr(person?.contact_details)) {
     const type = String(cd?.type || '').toLowerCase();
     if (type === 'facebook' && cd?.value) {
@@ -204,15 +214,11 @@ const buildRepRow = (opts: {
     division_id,
     name: fullName(person),
     office_name,
-    // email -> both email + contact_email for state-level (so sender can deliver)
     email: email ?? null,
     contact_email: email ?? null,
-    // socials (new columns)
     twitter_handle: twitter_handle ?? null,
     facebook_page_url: facebook_page_url ?? null,
-    // generic site/contact URLs, if present
-    contact_form_url:
-      (person?.url || person?.website || (arr(person?.links)[0]?.url as string) || null),
+    contact_form_url: (person?.url || person?.website || (arr(person?.links)[0]?.url as string) || null),
   };
 };
 
@@ -251,12 +257,16 @@ export const handler: Handler = async (event) => {
       return { statusCode: 400, headers: H, body: J({ error: 'Provide ?state=XX (two-letter code)' }) };
     }
 
-    const jurisdiction = stateName(state);
+    const doUpper = Boolean(sd);
+    const doLower = Boolean(hd);
+    if (!doUpper && !doLower) {
+      return { statusCode: 400, headers: H, body: J({ error: 'Provide sd and/or hd' }) };
+    }
 
     // ── 1) State Senator (upper / SD) ───────────────────────────────────────
     let seededSD = 0;
-    if (sd) {
-      const urlUpper = apiURL({ jurisdiction, chamber: 'upper', district: sd });
+    if (doUpper) {
+      const urlUpper = apiURL({ chamber: 'upper', district: sd! }, state);
       const jsU = await fetchJSON(urlUpper);
       const peopleU = extractPeople(jsU);
       const personU = peopleU[0]; // expect exactly one
@@ -267,12 +277,11 @@ export const handler: Handler = async (event) => {
           level: 'state',
           chamber: 'senate',
           state,
-          district: sd,
-          division_id: slduDiv(state, sd),
+          district: sd!,
+          division_id: slduDiv(state, sd!),
           office_name: 'State Senator',
         });
-        // clear only once we have a row to insert
-        await clearSlot(state, 'senate', sd);
+        await clearSlot(state, 'senate', sd!);
         await insertOne(row);
         seededSD = 1;
       }
@@ -280,8 +289,8 @@ export const handler: Handler = async (event) => {
 
     // ── 2) State Representative (lower / HD) ────────────────────────────────
     let seededHD = 0;
-    if (hd) {
-      const urlLower = apiURL({ jurisdiction, chamber: 'lower', district: hd });
+    if (doLower) {
+      const urlLower = apiURL({ chamber: 'lower', district: hd! }, state);
       const jsL = await fetchJSON(urlLower);
       const peopleL = extractPeople(jsL);
       const personL = peopleL[0];
@@ -292,11 +301,11 @@ export const handler: Handler = async (event) => {
           level: 'state',
           chamber: 'house',
           state,
-          district: hd,
-          division_id: sldlDiv(state, hd),
+          district: hd!,
+          division_id: sldlDiv(state, hd!),
           office_name: 'State Representative',
         });
-        await clearSlot(state, 'house', hd);
+        await clearSlot(state, 'house', hd!);
         await insertOne(row);
         seededHD = 1;
       }
