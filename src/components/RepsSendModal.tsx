@@ -577,12 +577,12 @@ CyberKingdomOfChrist.org`;
       <a href={tweetUrl} target="_blank" rel="noopener noreferrer"
          className="inline-flex items-center rounded px-2 py-1 text-xs border"
          title="Tweet (opens composer)">
-        Tweet
+        Twitter (X)
       </a>
       <a href={fbUrl} target="_blank" rel="noopener noreferrer"
          className="inline-flex items-center rounded px-2 py-1 text-xs border"
          title="Share on Facebook (opens share dialog)">
-        Share
+        Facebook
       </a>
     </div>
   );
@@ -611,7 +611,7 @@ CyberKingdomOfChrist.org`;
                   </label>
                   <label className="flex items-center gap-2 opacity-50 cursor-not-allowed" title="Tier-locked">
                     <input type="checkbox" checked={channels.x} disabled />
-                    <span>X (Twitter)</span>
+                    <span>Twitter (X)</span>
                   </label>
                   <label className="flex items-center gap-2 opacity-50 cursor-not-allowed" title="Tier-locked">
                     <input type="checkbox" checked={channels.facebook} disabled />
