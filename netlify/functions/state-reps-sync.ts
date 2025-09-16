@@ -50,177 +50,26 @@ const stateDiv = (state: string) => `ocd-division/country:us/state:${state.toLow
 const slduDiv = (state: string, sd: string) => `${stateDiv(state)}/sldu:${String(sd).trim()}`;
 const sldlDiv = (state: string, hd: string) => `${stateDiv(state)}/sldl:${String(hd).trim()}`;
 
-/** Build the people search URL. We include BOTH jurisdiction (full state name) and state code. */
-const apiURL = (params: Record<string,string|number|undefined>, state: string) => {
+const apiURL = (params: Record<string,string|number|undefined>) => {
   const u = new URL('https://v3.openstates.org/people');
   for (const [k,v] of Object.entries(params)) if (v !== undefined) u.searchParams.set(k, String(v));
-  // Preferred search hints (both are accepted by OpenStates)
-  const jurisdiction = stateName(state);
-  u.searchParams.set('jurisdiction', jurisdiction);
-  u.searchParams.set('state', state);
-  // keep a small page size; we expect a single match
-  u.searchParams.set('per_page', '5');
-  // still include apikey as a query param (harmless redundancy)
   u.searchParams.set('apikey', OPENSTATES_API_KEY);
+  // We ask for small page sizes; there should be only 1 match for a single district
+  u.searchParams.set('per_page', '5');
   return u.toString();
 };
 
-/** fetch with timeout + retries; include X-API-KEY + UA headers */
-async function fetchJSON(url: string, retry = 2): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000); // 10s
-  try {
-    const r = await fetch(url, {
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'CKOC/1.0 (+https://cyberkingdomofchrist.org)',
-        'X-API-KEY': OPENSTATES_API_KEY,
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!r.ok) {
-      const t = await r.text().catch(() => '');
-      throw new Error(`HTTP ${r.status} :: ${t.slice(0,240)}`);
-    }
-    return r.json();
-  } catch (err: any) {
-    clearTimeout(timeout);
-    const msg = String(err?.message || err || '');
-    // Retry on timeouts or transient upstream failures
-    if (retry > 0 && (/aborted|timeout|ETIMEDOUT|ECONNRESET|fetch failed|502|503|504/i.test(msg))) {
-      await new Promise(res => setTimeout(res, 350));
-      return fetchJSON(url, retry - 1);
-    }
-    throw new Error(`OpenStates fetch failed: ${msg}`);
+const fetchJSON = async (url: string) => {
+  const r = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(`HTTP ${r.status} :: ${t.slice(0,240)}`);
   }
-}
+  return r.json();
+};
 
 const pick = (...vals: any[]) => { for (const v of vals) if (v !== undefined && v !== null && v !== '') return v; return null; };
 const fullName = (p: any) => String(p.name || `${pick(p.given_name, p.givenName, '')} ${pick(p.family_name, p.familyName, '')}` || '').trim();
-
-const arr = (x: any) => (Array.isArray(x) ? x : []);
-const extractPeople = (js: any): any[] =>
-  arr(js?.results) || arr(js?.data) || arr(js?.people) || arr(js?.items) || [];
-
-/** Extract best-known email from OpenStates person object */
-const extractEmail = (person: any): string | null => {
-  const direct = pick(person?.email, person?.primary_email);
-  if (direct) return String(direct);
-  for (const off of arr(person?.offices)) if (off?.email) return String(off.email);
-  for (const cd of arr(person?.contact_details)) {
-    const type = String(cd?.type || '').toLowerCase();
-    if (type === 'email' && cd?.value) return String(cd.value);
-  }
-  return null;
-};
-
-/** Normalize a Twitter handle: strip URL/@ and keep [A-Za-z0-9_]{1,15} */
-const normalizeTwitterHandle = (val: string): string | null => {
-  if (!val) return null;
-  let v = String(val).trim();
-  if (v.startsWith('@')) v = v.slice(1);
-  try {
-    if (/^https?:\/\//i.test(v)) {
-      const u = new URL(v);
-      if (u.hostname.replace(/^www\./,'').toLowerCase() === 'twitter.com' || u.hostname.toLowerCase() === 'x.com') {
-        const seg = u.pathname.split('/').filter(Boolean)[0] || '';
-        v = seg.startsWith('@') ? seg.slice(1) : seg;
-      }
-    }
-  } catch { /* ignore URL parse */ }
-  v = v.replace(/[^A-Za-z0-9_]/g, '');
-  if (!v) return null;
-  return v.slice(0, 15);
-};
-
-/** Extract Twitter handle from various OpenStates shapes */
-const extractTwitterHandle = (person: any): string | null => {
-  const idsTw = pick(person?.ids?.twitter, person?.twitter, person?.social_media?.twitter);
-  const normIds = idsTw ? normalizeTwitterHandle(String(idsTw)) : null;
-  if (normIds) return normIds;
-  for (const cd of arr(person?.contact_details)) {
-    const type = String(cd?.type || '').toLowerCase();
-    if (type === 'twitter' && cd?.value) {
-      const norm = normalizeTwitterHandle(String(cd.value));
-      if (norm) return norm;
-    }
-  }
-  for (const link of arr(person?.links)) {
-    const url = String(link?.url || '');
-    if (/twitter\.com|x\.com/i.test(url)) {
-      const norm = normalizeTwitterHandle(url);
-      if (norm) return norm;
-    }
-  }
-  return null;
-};
-
-/** Normalize a Facebook page URL; if given a slug/ID, prefix with https://www.facebook.com/ */
-const normalizeFacebookUrl = (val: string): string | null => {
-  if (!val) return null;
-  let v = String(val).trim();
-  if (!/^https?:\/\//i.test(v)) v = `https://www.facebook.com/${v.replace(/^@/, '')}`;
-  try {
-    const u = new URL(v);
-    if (!/facebook\.com$/i.test(u.hostname.replace(/^www\./,''))) return null;
-    u.search = ''; u.hash = '';
-    return u.toString();
-  } catch { return null; }
-};
-
-/** Extract Facebook page URL from various OpenStates shapes */
-const extractFacebookUrl = (person: any): string | null => {
-  const idsFb = pick(person?.ids?.facebook, person?.facebook, person?.social_media?.facebook);
-  const normIds = idsFb ? normalizeFacebookUrl(String(idsFb)) : null;
-  if (normIds) return normIds;
-  for (const cd of arr(person?.contact_details)) {
-    const type = String(cd?.type || '').toLowerCase();
-    if (type === 'facebook' && cd?.value) {
-      const norm = normalizeFacebookUrl(String(cd.value));
-      if (norm) return norm;
-    }
-  }
-  for (const link of arr(person?.links)) {
-    const url = String(link?.url || '');
-    if (/facebook\.com/i.test(url)) {
-      const norm = normalizeFacebookUrl(url);
-      if (norm) return norm;
-    }
-  }
-  return null;
-};
-
-/** Build common row fields from an OpenStates person */
-const buildRepRow = (opts: {
-  person: any;
-  level: 'state';
-  chamber: 'senate' | 'house';
-  state: string;
-  district: string;
-  division_id: string;
-  office_name: string;
-}) => {
-  const { person, level, chamber, state, district, division_id, office_name } = opts;
-  const email = extractEmail(person);
-  const twitter_handle = extractTwitterHandle(person);
-  const facebook_page_url = extractFacebookUrl(person);
-
-  return {
-    level,
-    chamber,
-    state,
-    district,
-    division_id,
-    name: fullName(person),
-    office_name,
-    email: email ?? null,
-    contact_email: email ?? null,
-    twitter_handle: twitter_handle ?? null,
-    facebook_page_url: facebook_page_url ?? null,
-    contact_form_url: (person?.url || person?.website || (arr(person?.links)[0]?.url as string) || null),
-  };
-};
 
 async function clearSlot(state: string, chamber: 'senate'|'house', district: string) {
   await supabase!.from('representatives')
@@ -257,31 +106,30 @@ export const handler: Handler = async (event) => {
       return { statusCode: 400, headers: H, body: J({ error: 'Provide ?state=XX (two-letter code)' }) };
     }
 
-    const doUpper = Boolean(sd);
-    const doLower = Boolean(hd);
-    if (!doUpper && !doLower) {
-      return { statusCode: 400, headers: H, body: J({ error: 'Provide sd and/or hd' }) };
-    }
+    const jurisdiction = stateName(state);
 
     // ── 1) State Senator (upper / SD) ───────────────────────────────────────
     let seededSD = 0;
-    if (doUpper) {
-      const urlUpper = apiURL({ chamber: 'upper', district: sd! }, state);
+    if (sd) {
+      // OpenStates people search for upper chamber district
+      const urlUpper = apiURL({ jurisdiction, chamber: 'upper', district: sd });
       const jsU = await fetchJSON(urlUpper);
-      const peopleU = extractPeople(jsU);
-      const personU = peopleU[0]; // expect exactly one
-
+      const peopleU: any[] = (jsU?.results ?? jsU?.data ?? jsU?.people ?? jsU?.items ?? []);
+      const personU = peopleU[0]; // there should be exactly one
+      await clearSlot(state, 'senate', sd);
       if (personU) {
-        const row = buildRepRow({
-          person: personU,
+        const row = {
           level: 'state',
           chamber: 'senate',
           state,
-          district: sd!,
-          division_id: slduDiv(state, sd!),
+          district: sd,
+          division_id: slduDiv(state, sd),
+          name: fullName(personU),
           office_name: 'State Senator',
-        });
-        await clearSlot(state, 'senate', sd!);
+          email: pick(personU.email, personU.primary_email) || null,
+          contact_email: null,
+          contact_form_url: pick(personU.url, personU.website, personU.links?.[0]?.url) || null,
+        };
         await insertOne(row);
         seededSD = 1;
       }
@@ -289,23 +137,25 @@ export const handler: Handler = async (event) => {
 
     // ── 2) State Representative (lower / HD) ────────────────────────────────
     let seededHD = 0;
-    if (doLower) {
-      const urlLower = apiURL({ chamber: 'lower', district: hd! }, state);
+    if (hd) {
+      const urlLower = apiURL({ jurisdiction, chamber: 'lower', district: hd });
       const jsL = await fetchJSON(urlLower);
-      const peopleL = extractPeople(jsL);
+      const peopleL: any[] = (jsL?.results ?? jsL?.data ?? jsL?.people ?? jsL?.items ?? []);
       const personL = peopleL[0];
-
+      await clearSlot(state, 'house', hd);
       if (personL) {
-        const row = buildRepRow({
-          person: personL,
+        const row = {
           level: 'state',
           chamber: 'house',
           state,
-          district: hd!,
-          division_id: sldlDiv(state, hd!),
+          district: hd,
+          division_id: sldlDiv(state, hd),
+          name: fullName(personL),
           office_name: 'State Representative',
-        });
-        await clearSlot(state, 'house', hd!);
+          email: pick(personL.email, personL.primary_email) || null,
+          contact_email: null,
+          contact_form_url: pick(personL.url, personL.website, personL.links?.[0]?.url) || null,
+        };
         await insertOne(row);
         seededHD = 1;
       }
