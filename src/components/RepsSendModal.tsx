@@ -2,7 +2,6 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { assignRepsForCurrentUser } from '@/lib/reps';
-import { outreach, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
 
 /** Share targets */
@@ -27,7 +26,6 @@ function buildFacebookShareUrl(url?: string, quote?: string) {
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
 
-// DB row shape we read directly (real column names)
 type RepRowDB = {
   id: string;
   name: string | null;
@@ -37,28 +35,25 @@ type RepRowDB = {
   level: 'federal' | 'state' | 'local' | null;
 };
 
-// Local shape used by the UI (what the JSX renders)
 type Rep = {
   id: string;
-  name: string;     // plain name
-  office: string;   // "U.S. Senator", "U.S. Representative", "State Senator", "State Representative"
+  name: string;
+  office: string;
   state: string | null;
-  district: string | null; // "21" etc. (label formatter will add "TX-21")
+  district: string | null;
   level: 'federal' | 'state' | 'local';
 };
 
-type Tier = 'free' | 'supporter' | 'patron' | 'admin';
 type Props = { prayerId: string; onClose: () => void };
 
-// Primary address snapshot for prompts
 type AddressInfo = {
   postal_code: string | null;
   state: string | null;
   city?: string | null;
   line1?: string | null;
-  cd?: string | null;  // congressional
-  sd?: string | null;  // state senate (upper)
-  hd?: string | null;  // state house (lower)
+  cd?: string | null;
+  sd?: string | null;
+  hd?: string | null;
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -92,22 +87,6 @@ function titleForRep(office: string | null): 'Sen.' | 'Rep.' | 'President' | 'Ho
   if (o.includes('house') || o.includes('representative') || o.includes('congress')) return 'Rep.';
   return 'Hon.';
 }
-function lastNameFrom(name: string): string {
-  const raw = name.replace(/[.,]/g, ' ').trim();
-  const parts = raw.split(/\s+/);
-  const suffixes = new Set(['jr','jr.','sr','sr.','ii','iii','iv','phd','m.d.','md','esq','esq.']);
-  while (parts.length && suffixes.has(parts[parts.length-1].toLowerCase())) parts.pop();
-  return parts.length ? parts[parts.length - 1] : name.trim();
-}
-function greetingForRep(rep: Pick<Rep, 'name' | 'office'>): string {
-  const t = titleForRep(rep.office);
-  const last = lastNameFrom(rep.name);
-  return `Dear ${t} ${last},`;
-}
-/** Label formatting:
- *  - Federal: "[Title.] [Name]-[STATE]"  e.g., "Sen. Jane Sample-TX"
- *  - State:   "[Title.] [Name], [STATE]-[DIST]" e.g., "Sen. Jane Sample, TX-21"
- */
 function displayNameForRep(rep: Rep): string {
   const t = titleForRep(rep.office);
   const name = rep.name;
@@ -119,37 +98,14 @@ function displayNameForRep(rep: Rep): string {
   }
   return `${t} ${name}${st ? `, ${st}` : ''}`;
 }
-function capForTier(tier: Tier | null): number {
-  switch (tier) {
-    case 'supporter': return 10;
-    case 'patron': return 20;
-    case 'admin': return 1000;
-    default: return 5; // free
-  }
-}
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Component
 // ──────────────────────────────────────────────────────────────────────────────
 export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [reps, setReps] = useState<Rep[]>([]);
-  const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [subject, setSubject] = useState<string>('');
-  const [body, setBody] = useState<string>(''); // server will prepend greeting per recipient
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const draftRef = useRef<HTMLTextAreaElement | null>(null);
 
-  // Tier & quota UI
-  const [tier, setTier] = useState<Tier>('free');
-  const [dailyCap, setDailyCap] = useState<number>(5);
-  const [usedToday, setUsedToday] = useState<number>(0);
-
-  // Level filter UI
-  const [levelFilter, setLevelFilter] = useState<'all' | 'federal' | 'state'>('all');
-
-  // Address prompt state
+  // Keep for enrichment banner
   const [addr, setAddr] = useState<AddressInfo | null>(null);
   const needsDistricts = useMemo(() => {
     if (!addr) return false;
@@ -158,19 +114,25 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
 
-  // Shared loader so we can refresh after enrichment
+  // Prayer text to share (no email draft UI)
+  const [prayerText, setPrayerText] = useState<string>('');
+
+  // Level filter UI
+  const [levelFilter, setLevelFilter] = useState<'all' | 'federal' | 'state'>('all');
+
+  // Shared loader
   const loadAll = async () => {
     setLoading(true);
     setError(null);
 
-    // Ensure user->rep mappings exist based on their address
+    // Ensure user->rep mappings exist
     await assignRepsForCurrentUser();
 
     const { data: ures, error: uerr } = await supabase.auth.getUser();
     if (uerr || !ures.user) { throw new Error('Please sign in.'); }
     const userId = ures.user.id;
 
-    // Fetch primary address (for prompt & enrichment params)
+    // Primary address (for enrichment banner)
     {
       const { data: a, error: aerr } = await (supabase as any)
         .from('user_addresses')
@@ -190,7 +152,7 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
       });
     }
 
-    // Fetch mapping → ids
+    // Mappings → ids
     const { data: mapRows, error: mapErr } = await supabase
       .from('user_representatives')
       .select('rep_id')
@@ -198,16 +160,16 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
     if (mapErr) throw new Error(mapErr.message);
     const ids = (mapRows ?? []).map(r => r.rep_id);
 
-    // Fetch reps
+    // Representatives
     let list: Rep[] = [];
     if (ids.length) {
       const { data: repsRows, error: repsErr } = await (supabase as any)
         .from('representatives')
-        .select('id, name, office_name, state, district, level')
+        .select('id, name, office_name, state, district, level, twitter_handle')
         .in('id', ids);
       if (repsErr) throw new Error(repsErr.message);
 
-      list = ((repsRows as RepRowDB[]) ?? []).map(r => ({
+      list = ((repsRows as any[]) ?? []).map((r) => ({
         id: r.id,
         name: (r.name ?? 'Representative'),
         office: (r.office_name ?? 'Representative'),
@@ -216,10 +178,12 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
         level: (r.level === 'federal' || r.level === 'state' || r.level === 'local')
           ? r.level
           : inferLevel(r.office_name),
+        // twitter_handle may or may not exist; keep on the object if present
+        ...(r.twitter_handle ? { twitter_handle: r.twitter_handle } : {}),
       }));
     }
 
-    // Prayer content for body
+    // Prayer content (used for share text)
     const { data: prayerRow, error: prayerErr } = await supabase
       .from('prayers')
       .select('content')
@@ -227,50 +191,8 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
       .maybeSingle();
     if (prayerErr) throw new Error(prayerErr.message);
 
-    // Profile (for sender + tier)
-    const { data: prof, error: profErr } = await supabase
-      .from('profiles')
-      .select('display_name, username, tier')
-      .eq('id', userId)
-      .maybeSingle();
-    if (profErr) throw new Error(profErr.message);
-
-    const sender = String(prof?.display_name || prof?.username || 'CKoC Member');
-
-    // profiles.tier is a string in your types; narrow to our Tier union safely
-    const rawTier = (prof?.tier ?? 'free') as string;
-    const normalizedTier = (['free', 'supporter', 'patron', 'admin'] as const).includes(rawTier as Tier)
-      ? (rawTier as Tier)
-      : 'free';
-    const cap = capForTier(normalizedTier);
-
-    // Used today (server counts by send_date, which is UTC)
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-    const { count: usedCnt, error: countErr } = await supabase
-      .from('outreach_requests')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('send_date', today);
-    if (countErr) throw new Error(countErr.message);
-
-    const defaultSubject = `Message from a Cyber Kingdom of Christ user: ${sender}`;
-    const defaultBody =
-`${prayerRow?.content || '(prayer content)'}
-    
-Sincerely,
-${sender}
-CyberKingdomOfChrist.org`;
-
-    // Default **DESELECT** all reps (checkboxes off by default)
-    const defSel: Record<string, boolean> = {};
-
     setReps(list);
-    setSelected(defSel);
-    setSubject(defaultSubject);
-    setBody(defaultBody);
-    setTier(normalizedTier);
-    setDailyCap(cap);
-    setUsedToday(usedCnt ?? 0);
+    setPrayerText(String(prayerRow?.content || '').trim());
   };
 
   useEffect(() => {
@@ -288,29 +210,18 @@ CyberKingdomOfChrist.org`;
     return () => { alive = false; };
   }, [prayerId]);
 
-  // Filtered list for display (All / Federal / State)
   const displayReps = useMemo(() => {
     if (levelFilter === 'all') return reps;
     return (reps ?? []).filter((r) => r.level === levelFilter);
   }, [reps, levelFilter]);
 
-  // Group by level for the UI sections
   const grouped = useMemo(() => {
     const g: Record<Rep['level'], Rep[]> = { federal: [], state: [], local: [] };
     for (const r of displayReps) g[r.level].push(r);
     return g;
   }, [displayReps]);
 
-  const selectedReps = useMemo(() => reps.filter(r => selected[r.id]), [reps, selected]);
-  const greetingPreview = useMemo(() => selectedReps.slice(0, 3).map(r => greetingForRep(r)), [selectedReps]);
-
-  const remaining = Math.max(0, dailyCap - usedToday);
-  const selectedCount = selectedReps.length;
-  const overCap = selectedCount > remaining;
-
-  const toggleRep = (id: string) => setSelected(prev => ({ ...prev, [id]: !prev[id] }));
-
-  // Gentle address/district enrichment
+  // Enrichment flow (unchanged)
   const handleDetectDistricts = async () => {
     try {
       setEnrichBusy(true);
@@ -320,7 +231,6 @@ CyberKingdomOfChrist.org`;
       if (uerr || !ures.user) throw new Error('Please sign in.');
       const userId = ures.user.id;
 
-      // Pull current address (to send to geocoder)
       const { data: a, error: aerr } = await (supabase as any)
         .from('user_addresses')
         .select('postal_code, state, city, line1, cd, sd, hd')
@@ -330,7 +240,6 @@ CyberKingdomOfChrist.org`;
       if (aerr) throw new Error(aerr.message);
       if (!a?.postal_code) throw new Error('Please add a ZIP code to your profile address.');
 
-      // 1) Enrich via Census Geocoder (server function updates user_addresses)
       const geoRes = await fetch('/.netlify/functions/geo-enrich', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -349,13 +258,11 @@ CyberKingdomOfChrist.org`;
       const sd = gj?.sd || a?.sd || null;
       const hd = gj?.hd || a?.hd || null;
 
-      // 2) Seed federal reps (state + optional House district)
       setEnrichMsg('Syncing federal representatives…');
       const q1 = new URLSearchParams({ state: st });
       if (cd && cd !== 'At-Large') q1.set('house_district', String(cd));
       await fetch(`/.netlify/functions/reps-sync?${q1.toString()}`);
 
-      // 3) Seed state legislators (sd/hd if present)
       if (sd || hd) {
         setEnrichMsg('Syncing state legislators…');
         const q2 = new URLSearchParams({ state: st });
@@ -364,7 +271,6 @@ CyberKingdomOfChrist.org`;
         await fetch(`/.netlify/functions/state-reps-sync?${q2.toString()}`);
       }
 
-      // 4) Map user → representatives and refresh modal list
       setEnrichMsg('Finalizing…');
       await assignRepsForCurrentUser();
       await loadAll();
@@ -378,67 +284,14 @@ CyberKingdomOfChrist.org`;
     }
   };
 
-  const handleSend = async () => {
-    setError(null);
-    if (!selectedCount) return setError('Select at least one representative.');
-    if (overCap) {
-      return setError(`You can send to ${remaining} more recipient(s) today (daily cap ${dailyCap}). Deselect some recipients.`);
-    }
-
-    try {
-      setBusy(true);
-      const { data: ures } = await supabase.auth.getUser();
-      const userId = ures.user!.id;
-
-      const repIds = selectedReps.map(r => r.id);
-      const res = await outreach.enqueueOutreachToSelected({
-        userId,
-        prayerId,
-        repIds,
-        channels: ['email'], // server-side email channel; Channels UI removed
-        subject,
-        body,
-      });
-      await deliverSingleByPrayerId(prayerId);
-
-      setBusy(false);
-      if (res.error) {
-        const msg = String(res.error.message || '');
-        if (msg.includes('Daily outreach limit')) {
-          setError('You’ve reached your daily outreach limit. Try again tomorrow.');
-        } else {
-          setError(res.error.message || 'Failed to enqueue outreach.');
-        }
-        return;
-      }
-      if (!res.data || res.data.length === 0) {
-        alert('Already queued for all selected recipients today.');
-        onClose();
-        return;
-      }
-      alert(`Queued ${res.data.length} recipient(s).`);
-      onClose();
-    } catch (e: any) {
-      setBusy(false);
-      setError(e?.message || 'Unexpected error.');
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-[9999] flex items-start sm:items-center justify-center overflow-y-auto p-4">
-
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div className="relative bg-white w-full max-w-2xl rounded-2xl shadow-xl p-6 mx-auto my-6 md:my-10 max-h-[min(92svh,calc(100dvh-3rem))] overflow-y-auto">
 
         <div className="flex items-start justify-between mb-4">
-          <h2 className="text-xl font-semibold">Send to Representatives</h2>
+          <h2 className="text-xl font-semibold">Share to Representatives</h2>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-800">✕</button>
-        </div>
-
-        {/* Tier banner */}
-        <div className="mb-4 rounded-md border bg-gray-50 p-3 text-sm">
-          <div><span className="font-semibold capitalize">{tier}</span> tier • Daily cap: <span className="font-semibold">{dailyCap}</span></div>
-          <div>Used today: <span className="font-semibold">{usedToday}</span> • Remaining: <span className="font-semibold">{Math.max(0, dailyCap - usedToday)}</span></div>
         </div>
 
         {/* Gentle address prompt */}
@@ -467,156 +320,101 @@ CyberKingdomOfChrist.org`;
         ) : reps.length === 0 ? (
           <p className="text-sm text-gray-600">No representatives mapped for your address yet.</p>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Left: recipients */}
-            <div>
-              {/* Level filter */}
-              <div className="mb-3 flex items-center gap-2">
-                <span className="text-sm font-medium">Level:</span>
-                <button
-                  type="button"
-                  onClick={() => setLevelFilter('all')}
-                  aria-pressed={levelFilter === 'all'}
-                  className={`px-2 py-1 rounded ${levelFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
-                >
-                  All
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLevelFilter('federal')}
-                  aria-pressed={levelFilter === 'federal'}
-                  className={`px-2 py-1 rounded ${levelFilter === 'federal' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
-                >
-                  Federal
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLevelFilter('state')}
-                  aria-pressed={levelFilter === 'state'}
-                  className={`px-2 py-1 rounded ${levelFilter === 'state' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
-                >
-                  State
-                </button>
-              </div>
+          <div>
+            {/* Level filter */}
+            <div className="mb-3 flex items-center gap-2">
+              <span className="text-sm font-medium">Level:</span>
+              <button
+                type="button"
+                onClick={() => setLevelFilter('all')}
+                aria-pressed={levelFilter === 'all'}
+                className={`px-2 py-1 rounded ${levelFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                onClick={() => setLevelFilter('federal')}
+                aria-pressed={levelFilter === 'federal'}
+                className={`px-2 py-1 rounded ${levelFilter === 'federal' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+              >
+                Federal
+              </button>
+              <button
+                type="button"
+                onClick={() => setLevelFilter('state')}
+                aria-pressed={levelFilter === 'state'}
+                className={`px-2 py-1 rounded ${levelFilter === 'state' ? 'bg-blue-600 text-white' : 'bg-gray-200'}`}
+              >
+                State
+              </button>
+            </div>
 
-              <div className="mb-3">
-                <div className="text-sm font-medium mb-2">Recipients</div>
-                <div className="border rounded-lg overflow-hidden">
-                  {(['federal','state'] as const).map(level => (
-                    <div key={level} className="border-b last:border-b-0">
-                      <div className="bg-gray-50 px-3 py-1.5 text-xs font-semibold uppercase">{level}</div>
-                      {(grouped[level] || []).map(r => (
-                        <label key={r.id} className="flex items-start gap-3 px-3 py-2">
-                          <input
-                            type="checkbox"
-                            checked={!!selected[r.id]}
-                            onChange={() => setSelected(prev => ({ ...prev, [r.id]: !prev[r.id] }))}
-                            className="mt-1"
-                          />
-                          <div>
-                            <div className="font-medium">{displayNameForRep(r)}</div>
-                            <div className="text-xs text-gray-600">{r.office}</div>
+            <div className="border rounded-lg overflow-hidden">
+              {(['federal','state'] as const).map(level => (
+                <div key={level} className="border-b last:border-b-0">
+                  <div className="bg-gray-50 px-3 py-1.5 text-xs font-semibold uppercase">{level}</div>
+                  {(grouped[level] || []).map(r => (
+                    <div key={r.id} className="flex items-start gap-3 px-3 py-2">
+                      <div className="mt-1">•</div>
+                      <div>
+                        <div className="font-medium">{displayNameForRep(r)}</div>
+                        <div className="text-xs text-gray-600">{r.office}</div>
 
-                            {/* Per-rep social share (UI-only) */}
-                            {(() => {
-                              // Prefer @handle when available in the data; otherwise use display label
-                              const handle = (r as any)?.twitter_handle as string | undefined;
-                              const mention = handle && handle.trim()
-                                ? `@${handle.replace(/^@/, '').trim()}`
-                                : displayNameForRep(r);
+                        {/* Per-rep share buttons */}
+                        {(() => {
+                          // Prefer @handle when available; fall back to label
+                          const handle = (r as any)?.twitter_handle as string | undefined;
+                          const mention = handle && handle.trim()
+                            ? `@${handle.replace(/^@/, '').trim()}`
+                            : displayNameForRep(r);
 
-                              // Use actual prayer text; Twitter safely truncated to fit with mention
-                              const draft = (draftRef.current?.value?.trim() || '');
-                              const rawTweet = draft ? `${mention}, ${draft}` : `${mention}, please consider this prayer.`;
-                              const MAX = 260; // leave room for link param
-                              const tweetText = rawTweet.length > MAX ? (rawTweet.slice(0, MAX - 1) + '…') : rawTweet;
+                          // Use actual prayer text; Twitter safely truncated to fit with mention
+                          const draft = (prayerText || '').trim();
+                          const rawTweet = draft ? `${mention}, ${draft}` : `${mention}, please consider this prayer.`;
+                          const MAX = 260; // conservative headroom for link param
+                          const tweetText = rawTweet.length > MAX ? (rawTweet.slice(0, MAX - 1) + '…') : rawTweet;
 
-                              const tweetUrl = buildTweetUrlText(tweetText, FEED_URL);
-                              const fbQuote  = draft || `Please consider this prayer. ${displayNameForRep(r)}`;
-                              const fbUrl    = buildFacebookShareUrl(FEED_URL, fbQuote);
+                          const tweetUrl = buildTweetUrlText(tweetText, FEED_URL);
+                          const fbQuote  = draft || `Please consider this prayer. ${displayNameForRep(r)}`;
+                          const fbUrl    = buildFacebookShareUrl(FEED_URL, fbQuote);
 
-                              return (
-                                <div className="mt-1 flex gap-2">
-                                  <a
-                                    href={tweetUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center rounded px-2 py-1 text-xs border"
-                                    title="Tweet (opens composer)"
-                                  >
-                                    Twitter (X)
-                                  </a>
-                                  <a
-                                    href={fbUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center rounded px-2 py-1 text-xs border"
-                                    title="Share on Facebook (opens share dialog)"
-                                  >
-                                    Facebook
-                                  </a>
-                                </div>
-                              );
-                            })()}
-
-                          </div>
-                        </label>
-                      ))}
+                          return (
+                            <div className="mt-1 flex gap-2">
+                              <a
+                                href={tweetUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center rounded px-2 py-1 text-xs border"
+                                title="Tweet (opens composer)"
+                              >
+                                Twitter (X)
+                              </a>
+                              <a
+                                href={fbUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center rounded px-2 py-1 text-xs border"
+                                title="Share on Facebook (opens share dialog)"
+                              >
+                                Facebook
+                              </a>
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
                   ))}
                 </div>
-                {overCap && (
-                  <p className="text-xs text-red-600 mt-2">
-                    You’ve selected {selectedCount} recipients but only {Math.max(0, dailyCap - usedToday)} send(s) remain today.
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* Right: draft/review */}
-            <div>
-              <div className="text-sm font-medium mb-2">Draft (Email)</div>
-              <div className="space-y-2">
-                <input
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                  className="w-full border rounded-md px-3 py-2"
-                  placeholder="Subject"
-                  maxLength={180}
-                />
-                {selectedReps.length > 0 && (
-                  <div className="rounded-md border p-3 bg-gray-50 text-xs text-gray-700">
-                    <div className="font-semibold mb-1">Greeting preview (per recipient):</div>
-                    <ul className="list-disc ml-5 space-y-0.5">
-                      {greetingPreview.map((g, i) => (<li key={i}>{g}</li>))}
-                      {selectedReps.length > greetingPreview.length && (<li>…and {selectedReps.length - greetingPreview.length} more</li>)}
-                    </ul>
-                    <div className="mt-2">The server will prepend the correct greeting for each recipient.</div>
-                  </div>
-                )}
-                <textarea
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  className="w-full border rounded-md px-3 py-2 min-h-[180px]"
-                  placeholder="Body (greeting added per recipient on send)"
-                  ref={draftRef}
-                />
-                <p className="text-xs text-gray-500">Delivery happens server-side.</p>
-              </div>
+              ))}
             </div>
           </div>
         )}
 
         {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
 
-        <div
-          className="mt-6 sticky bottom-0 bg-white pt-4 flex justify-end gap-2"
-          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-        >
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleSend} disabled={busy || loading || reps.length === 0 || overCap || enrichBusy}>
-            {busy ? 'Queuing…' : 'Send'}
-          </Button>
+        <div className="mt-6 sticky bottom-0 bg-white pt-4 flex justify-end gap-2" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+          <Button variant="outline" onClick={onClose}>Close</Button>
         </div>
       </div>
     </div>
