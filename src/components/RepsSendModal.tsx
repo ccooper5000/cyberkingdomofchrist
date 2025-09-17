@@ -1,60 +1,27 @@
 // src/components/RepsSendModal.tsx
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { assignRepsForCurrentUser } from '@/lib/reps';
-import { outreach, type OutreachChannel, deliverSingleByPrayerId } from '@/lib/outreach';
+import { outreach, deliverSingleByPrayerId } from '@/lib/outreach';
 import { Button } from '@/components/ui/button';
-import { useRef } from 'react';
 
-
-// — Social share helpers (UI-only, safe) —
-function buildTweetIntentText(repNames: string[], base: string) {
-  const names = repNames.slice(0, 3).join(', ');
-  const more = repNames.length > 3 ? `, +${repNames.length - 3} more` : '';
-  return `${base} ${names}${more}`.trim();
-}
-// — Social share helpers (UI-only, safe) —
-function buildTweetUrl(repName: string, text?: string, url?: string) {
-  const content = [text?.trim() || 'Please consider this prayer.', repName].join(' ').trim();
-  const params = new URLSearchParams({ text: content });
-  if (url) params.set('url', url);
-  return `https://x.com/intent/tweet?${params.toString()}`;
-}
-function buildFacebookShareUrl(url?: string, quote?: string) {
-  const params = new URLSearchParams();
-  if (url) params.set('u', url);
-  if (quote && quote.trim()) params.set('quote', quote.trim());
-  return `https://www.facebook.com/sharer/sharer.php?${params.toString()}`;
-}
-
-
-
-// — Social share helpers (UI-only, safe) —
-function buildTweetIntent(opts: { repName: string; twitterHandle?: string; text?: string; url?: string }) {
-  const { repName, twitterHandle, text, url } = opts;
-  const mention = twitterHandle?.trim() ? `@${twitterHandle.trim().replace(/^@/, '')}` : repName;
-  const params = new URLSearchParams();
-  params.set('text', [text?.trim() || 'Please consider this prayer.', mention].join(' ').trim());
-  if (url) params.set('url', url);
-  return `https://x.com/intent/tweet?${params.toString()}`;
-}
-
-function buildFacebookShare(opts: { url?: string; quote?: string }) {
-  const { url, quote } = opts;
-  const params = new URLSearchParams();
-  if (url) params.set('u', url);
-  if (quote?.trim()) params.set('quote', quote.trim());
-  return `https://www.facebook.com/sharer/sharer.php?${params.toString()}`;
-}
-
-/** NEW: fixed feed URL + helper to build a tweet purely from text */
+/** Share targets */
 const FEED_URL = 'https://cyberkingdomofchrist.netlify.app/feed';
+
+/** Build X (Twitter) intent URL with text (and optional url param) */
 function buildTweetUrlText(text: string, url?: string) {
   const params = new URLSearchParams({ text });
   if (url) params.set('url', url);
   return `https://x.com/intent/tweet?${params.toString()}`;
 }
 
+/** Build Facebook share dialog URL with optional quote and url */
+function buildFacebookShareUrl(url?: string, quote?: string) {
+  const params = new URLSearchParams();
+  if (url) params.set('u', url);
+  if (quote && quote.trim()) params.set('quote', quote.trim());
+  return `https://www.facebook.com/sharer/sharer.php?${params.toString()}`;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
@@ -168,13 +135,11 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [reps, setReps] = useState<Rep[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [channels, setChannels] = useState<Record<OutreachChannel, boolean>>({ email: true, x: false, facebook: false });
   const [subject, setSubject] = useState<string>('');
   const [body, setBody] = useState<string>(''); // server will prepend greeting per recipient
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
-
 
   // Tier & quota UI
   const [tier, setTier] = useState<Tier>('free');
@@ -188,7 +153,6 @@ export default function RepsSendModal({ prayerId, onClose }: Props) {
   const [addr, setAddr] = useState<AddressInfo | null>(null);
   const needsDistricts = useMemo(() => {
     if (!addr) return false;
-    // We consider it "needing" if any of the three is missing
     return !addr.cd || !addr.sd || !addr.hd;
   }, [addr]);
   const [enrichBusy, setEnrichBusy] = useState(false);
@@ -297,9 +261,8 @@ Sincerely,
 ${sender}
 CyberKingdomOfChrist.org`;
 
-    // default-select all that we loaded
+    // Default **DESELECT** all reps (checkboxes off by default)
     const defSel: Record<string, boolean> = {};
-    for (const r of list) defSel[r.id] = true;
 
     setReps(list);
     setSelected(defSel);
@@ -346,7 +309,6 @@ CyberKingdomOfChrist.org`;
   const overCap = selectedCount > remaining;
 
   const toggleRep = (id: string) => setSelected(prev => ({ ...prev, [id]: !prev[id] }));
-  const toggleChannel = (ch: OutreachChannel) => { if (ch === 'email') setChannels(prev => ({ ...prev, email: !prev.email })); };
 
   // Gentle address/district enrichment
   const handleDetectDistricts = async () => {
@@ -416,12 +378,9 @@ CyberKingdomOfChrist.org`;
     }
   };
 
-  
-
   const handleSend = async () => {
     setError(null);
     if (!selectedCount) return setError('Select at least one representative.');
-    if (!channels.email) return setError('Select at least one channel.');
     if (overCap) {
       return setError(`You can send to ${remaining} more recipient(s) today (daily cap ${dailyCap}). Deselect some recipients.`);
     }
@@ -436,7 +395,7 @@ CyberKingdomOfChrist.org`;
         userId,
         prayerId,
         repIds,
-        channels: ['email'],
+        channels: ['email'], // server-side email channel; Channels UI removed
         subject,
         body,
       });
@@ -509,7 +468,7 @@ CyberKingdomOfChrist.org`;
           <p className="text-sm text-gray-600">No representatives mapped for your address yet.</p>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Left: recipients + channels */}
+            {/* Left: recipients */}
             <div>
               {/* Level filter */}
               <div className="mb-3 flex items-center gap-2">
@@ -557,37 +516,48 @@ CyberKingdomOfChrist.org`;
                           <div>
                             <div className="font-medium">{displayNameForRep(r)}</div>
                             <div className="text-xs text-gray-600">{r.office}</div>
-                {/* Per-rep social share (UI-only) */}
-{(() => {
-  // Prefer @handle when available; fall back to label
-  const handle = (r as any)?.twitter_handle as string | undefined;
-  const normalizedHandle = handle && handle.trim() ? `@${handle.replace(/^@/, '').trim()}` : displayNameForRep(r);
 
-  // Twitter: fixed CKOC phrasing + feed link
-  const twitterText = `${normalizedHandle}, please consider this prayer from CyberKingdomOfChrist`;
-  const tweetUrl = buildTweetUrlText(twitterText, FEED_URL);
+                            {/* Per-rep social share (UI-only) */}
+                            {(() => {
+                              // Prefer @handle when available in the data; otherwise use display label
+                              const handle = (r as any)?.twitter_handle as string | undefined;
+                              const mention = handle && handle.trim()
+                                ? `@${handle.replace(/^@/, '').trim()}`
+                                : displayNameForRep(r);
 
-  // Facebook: use current Draft (prayer) if present; otherwise friendly fallback
-  const draft = (typeof draftRef !== 'undefined' && draftRef?.current?.value?.trim()) || '';
-  const fbQuote = draft || `Please consider this prayer from CyberKingdomOfChrist. ${displayNameForRep(r)}`;
-  const fbUrl = buildFacebookShareUrl(FEED_URL, fbQuote);
+                              // Use actual prayer text; Twitter safely truncated to fit with mention
+                              const draft = (draftRef.current?.value?.trim() || '');
+                              const rawTweet = draft ? `${mention}, ${draft}` : `${mention}, please consider this prayer.`;
+                              const MAX = 260; // leave room for link param
+                              const tweetText = rawTweet.length > MAX ? (rawTweet.slice(0, MAX - 1) + '…') : rawTweet;
 
-  return (
-    <div className="mt-1 flex gap-2">
-      <a href={tweetUrl} target="_blank" rel="noopener noreferrer"
-         className="inline-flex items-center rounded px-2 py-1 text-xs border"
-         title="Tweet (opens composer)">
-        Twitter (X)
-      </a>
-      <a href={fbUrl} target="_blank" rel="noopener noreferrer"
-         className="inline-flex items-center rounded px-2 py-1 text-xs border"
-         title="Share on Facebook (opens share dialog)">
-        Facebook
-      </a>
-    </div>
-  );
-})()}
+                              const tweetUrl = buildTweetUrlText(tweetText, FEED_URL);
+                              const fbQuote  = draft || `Please consider this prayer. ${displayNameForRep(r)}`;
+                              const fbUrl    = buildFacebookShareUrl(FEED_URL, fbQuote);
 
+                              return (
+                                <div className="mt-1 flex gap-2">
+                                  <a
+                                    href={tweetUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center rounded px-2 py-1 text-xs border"
+                                    title="Tweet (opens composer)"
+                                  >
+                                    Twitter (X)
+                                  </a>
+                                  <a
+                                    href={fbUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center rounded px-2 py-1 text-xs border"
+                                    title="Share on Facebook (opens share dialog)"
+                                  >
+                                    Facebook
+                                  </a>
+                                </div>
+                              );
+                            })()}
 
                           </div>
                         </label>
@@ -601,31 +571,19 @@ CyberKingdomOfChrist.org`;
                   </p>
                 )}
               </div>
-
-              <div className="mb-3">
-                <div className="text-sm font-medium mb-2">Channels</div>
-                <div className="flex items-center gap-4">
-                  <label className="flex items-center gap-2">
-                    <input type="checkbox" checked={channels.email} onChange={() => toggleChannel('email')} />
-                    <span>Email</span>
-                  </label>
-                  <label className="flex items-center gap-2 opacity-50 cursor-not-allowed" title="Tier-locked">
-                    <input type="checkbox" checked={channels.x} disabled />
-                    <span>Twitter (X)</span>
-                  </label>
-                  <label className="flex items-center gap-2 opacity-50 cursor-not-allowed" title="Tier-locked">
-                    <input type="checkbox" checked={channels.facebook} disabled />
-                    <span>Facebook</span>
-                  </label>
-                </div>
-              </div>
             </div>
 
             {/* Right: draft/review */}
             <div>
               <div className="text-sm font-medium mb-2">Draft (Email)</div>
               <div className="space-y-2">
-                <input value={subject} onChange={(e) => setSubject(e.target.value)} className="w-full border rounded-md px-3 py-2" placeholder="Subject" maxLength={180} />
+                <input
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  className="w-full border rounded-md px-3 py-2"
+                  placeholder="Subject"
+                  maxLength={180}
+                />
                 {selectedReps.length > 0 && (
                   <div className="rounded-md border p-3 bg-gray-50 text-xs text-gray-700">
                     <div className="font-semibold mb-1">Greeting preview (per recipient):</div>
@@ -636,11 +594,14 @@ CyberKingdomOfChrist.org`;
                     <div className="mt-2">The server will prepend the correct greeting for each recipient.</div>
                   </div>
                 )}
-                <textarea value={body} onChange={(e) => setBody(e.target.value)} className="w-full border rounded-md px-3 py-2 min-h-[180px]" placeholder="Body (greeting added per recipient on send)" ref={draftRef}/>
+                <textarea
+                  value={body}
+                  onChange={(e) => setBody(e.target.value)}
+                  className="w-full border rounded-md px-3 py-2 min-h-[180px]"
+                  placeholder="Body (greeting added per recipient on send)"
+                  ref={draftRef}
+                />
                 <p className="text-xs text-gray-500">Delivery happens server-side.</p>
-
-
-
               </div>
             </div>
           </div>
@@ -649,10 +610,9 @@ CyberKingdomOfChrist.org`;
         {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
 
         <div
-  className="mt-6 sticky bottom-0 bg-white pt-4 flex justify-end gap-2"
-  style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
->
-
+          className="mt-6 sticky bottom-0 bg-white pt-4 flex justify-end gap-2"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={handleSend} disabled={busy || loading || reps.length === 0 || overCap || enrichBusy}>
             {busy ? 'Queuing…' : 'Send'}
